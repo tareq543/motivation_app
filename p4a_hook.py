@@ -1,5 +1,6 @@
 import glob
 import os
+import re
 import shutil
 
 
@@ -47,6 +48,11 @@ CONDBLOCKER_STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
 </resources>
 """
 
+_DESC_RE = re.compile(
+    r'\n?[ \t]*<string\s+name="accessibility_service_description"[^>]*>.*?</string>',
+    re.DOTALL,
+)
+
 
 def _find_dist_dirs(project_dir: str) -> list[str]:
     candidates = []
@@ -74,7 +80,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
             if fname.endswith(".xml"):
                 shutil.copy2(os.path.join(src_xml, fname), os.path.join(dst_xml, fname))
 
-    # 2. إضافة ملف النصوص المستقل + تحديث قالب strings.tmpl.xml
+    # 2. إضافة ملف النصوص المستقل فقط + تحديث اسم التطبيق في strings.tmpl.xml دون تكرار الوصف
     values_dir = os.path.join(dist_dir, "src", "main", "res", "values")
     os.makedirs(values_dir, exist_ok=True)
     with open(os.path.join(values_dir, "condblocker_strings.xml"), "w", encoding="utf-8") as f:
@@ -84,13 +90,22 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
     if os.path.exists(strings_tmpl):
         with open(strings_tmpl, "r", encoding="utf-8") as f:
             s_content = f.read()
-        if "accessibility_service_description" not in s_content:
-            s_content = s_content.replace(
-                '<string name="app_name">{{ args.name }}</string>',
-                '<string name="app_name">الحظر المشروط</string>\n    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق الحظر المشروط من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>',
-            )
+        new_content = _DESC_RE.sub("", s_content).replace(
+            '<string name="app_name">{{ args.name }}</string>',
+            '<string name="app_name">الحظر المشروط</string>',
+        )
+        if new_content != s_content:
             with open(strings_tmpl, "w", encoding="utf-8") as f:
-                f.write(s_content)
+                f.write(new_content)
+
+    strings_xml = os.path.join(values_dir, "strings.xml")
+    if os.path.exists(strings_xml):
+        with open(strings_xml, "r", encoding="utf-8") as f:
+            x_content = f.read()
+        new_x_content = _DESC_RE.sub("", x_content)
+        if new_x_content != x_content:
+            with open(strings_xml, "w", encoding="utf-8") as f:
+                f.write(new_x_content)
 
     # 3. حقن الخدمات والمستقبلات في قالب AndroidManifest.tmpl.xml
     tmpl_candidates = [
