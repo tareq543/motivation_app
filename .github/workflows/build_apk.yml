@@ -68,7 +68,7 @@ jobs:
       - name: Build Debug APK
         run: |
           set -o pipefail
-          yes | buildozer -v android debug 2>&1 | tee buildozer.log || {
+          buildozer -v android debug < <(yes 2>/dev/null) 2>&1 | tee buildozer.log || {
             echo "=========================================="
             echo "GRADLE / APK COMPILER ERROR DETAILS:"
             echo "=========================================="
@@ -76,10 +76,10 @@ jobs:
             ./gradlew assembleDebug --stacktrace --no-daemon
             exit 1
           }
-        
+
       - name: Save Buildozer Cache
         uses: actions/cache/save@v4
-        if: always()
+        if: success()
         with:
           path: |
             .buildozer
@@ -90,5 +90,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: condblocker-debug-apk
-          path: bin/*.apk
-          if-no-files-found: error
+          path: bin/
