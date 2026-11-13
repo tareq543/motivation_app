@@ -48,28 +48,18 @@ CONDBLOCKER_STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
 """
 
 
-def _find_dist_dirs(toolchain, project_dir: str) -> list[str]:
+def _find_dist_dirs(project_dir: str) -> list[str]:
     candidates = []
-    for attr_chain in [
-        ("dist", "dist_dir"),
-        ("_dist", "dist_dir"),
-        ("ctx", "bootstrap", "dist_dir"),
-    ]:
-        obj = toolchain
-        for key in attr_chain:
-            obj = getattr(obj, key, None)
-            if obj is None:
-                break
-        if isinstance(obj, str) and os.path.isdir(obj):
-            candidates.append(obj)
+    cwd = os.getcwd()
+    if "dists" in cwd and os.path.isdir(cwd):
+        candidates.append(cwd)
 
-    if not candidates:
-        pattern = os.path.join(
-            project_dir, ".buildozer", "android", "platform", "build-*", "dists", "*"
-        )
-        for path in glob.glob(pattern):
-            if os.path.isdir(path):
-                candidates.append(path)
+    pattern = os.path.join(
+        project_dir, ".buildozer", "android", "platform", "build-*", "dists", "*"
+    )
+    for path in glob.glob(pattern):
+        if os.path.isdir(path):
+            candidates.append(path)
 
     return list(dict.fromkeys(candidates))
 
@@ -84,7 +74,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
             if fname.endswith(".xml"):
                 shutil.copy2(os.path.join(src_xml, fname), os.path.join(dst_xml, fname))
 
-    # 2. إضافة ملف النصوص المستقل + تحديث قالب strings.tmpl.xml ليظهر اسم التطبيق بالعربية على الهاتف
+    # 2. إضافة ملف النصوص المستقل + تحديث قالب strings.tmpl.xml
     values_dir = os.path.join(dist_dir, "src", "main", "res", "values")
     os.makedirs(values_dir, exist_ok=True)
     with open(os.path.join(values_dir, "condblocker_strings.xml"), "w", encoding="utf-8") as f:
@@ -94,12 +84,13 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
     if os.path.exists(strings_tmpl):
         with open(strings_tmpl, "r", encoding="utf-8") as f:
             s_content = f.read()
-        s_content = s_content.replace(
-            '<string name="app_name">{{ args.name }}</string>',
-            '<string name="app_name">الحظر المشروط</string>\n    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق الحظر المشروط من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>',
-        )
-        with open(strings_tmpl, "w", encoding="utf-8") as f:
-            f.write(s_content)
+        if "accessibility_service_description" not in s_content:
+            s_content = s_content.replace(
+                '<string name="app_name">{{ args.name }}</string>',
+                '<string name="app_name">الحظر المشروط</string>\n    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق الحظر المشروط من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>',
+            )
+            with open(strings_tmpl, "w", encoding="utf-8") as f:
+                f.write(s_content)
 
     # 3. حقن الخدمات والمستقبلات في قالب AndroidManifest.tmpl.xml
     tmpl_candidates = [
@@ -123,7 +114,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
 
 def before_apk_build(toolchain):
     project_dir = os.path.dirname(os.path.abspath(__file__))
-    dist_dirs = _find_dist_dirs(toolchain, project_dir)
+    dist_dirs = _find_dist_dirs(project_dir)
     for d in dist_dirs:
         _inject_into_dist(d, project_dir)
 
