@@ -30,26 +30,44 @@ jobs:
           sudo apt-get install -y \
             git zip unzip autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
-            cmake libffi-dev libssl-dev automake gettext
+            cmake libffi-dev libssl-dev automake gettext ccache
 
-      - name: Install Buildozer and Cython
+      - name: Install Buildozer, Cython, and Virtualenv
         run: |
           python -m pip install --upgrade pip
-          pip install buildozer==1.5.0 cython==0.29.36
+          pip install buildozer==1.5.0 cython==0.29.36 virtualenv setuptools packaging
 
-      - name: Cache Buildozer global & local directories
-        uses: actions/cache@v4
+      - name: Restore Buildozer Cache
+        uses: actions/cache/restore@v4
+        id: restore-cache
         with:
           path: |
             .buildozer
             ~/.buildozer
-          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
+            buildozer-v2-${{ runner.os }}-
             buildozer-${{ runner.os }}-
 
       - name: Build Debug APK
         run: |
-          yes | buildozer -v android debug
+          set -o pipefail
+          yes | buildozer android debug 2>&1 | tee buildozer_output.log
+
+      - name: Show Error Tail on Failure
+        if: failure()
+        run: |
+          echo "=== LAST 120 LINES OF BUILDOZER LOG ==="
+          tail -n 120 buildozer_output.log
+
+      - name: Save Buildozer Cache (Even on Failure)
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-v2-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}-${{ github.run_id }}
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
