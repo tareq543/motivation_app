@@ -57,8 +57,8 @@ jobs:
       - name: Show Error Tail on Failure
         if: failure()
         run: |
-          echo "=== LAST 120 LINES OF BUILDOZER LOG ==="
-          tail -n 120 buildozer_output.log
+          echo "=== LINES RIGHT BEFORE COMMAND FAILED ==="
+          grep -B 60 -A 5 "Command failed" buildozer_output.log || tail -n 150 buildozer_output.log
 
       - name: Save Buildozer Cache (Even on Failure)
         uses: actions/cache/save@v4
