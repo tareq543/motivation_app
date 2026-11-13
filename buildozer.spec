@@ -1,6 +1,7 @@
 [app]
 
-title = الحظر المشروط
+# اسم لاتيني لملف الـ APK لتجنب خطأ الترميز في سطر الأوامر (سيظهر بالعربية على الهاتف)
+title = CondBlocker
 package.name = condblocker
 package.domain = org.guardian
 
@@ -8,7 +9,6 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,xml,java,json
 version = 1.0.0
 
-# إصدار p4a المستقر يستخدم Python 3.11.5 افتراضياً لكل من python3 و hostpython3
 requirements = python3,kivy==2.3.0,kivymd==1.2.0,pyjnius,sqlite3,arabic-reshaper,python-bidi==0.4.2
 
 orientation = portrait
@@ -25,7 +25,6 @@ android.archs = arm64-v8a
 android.allow_backup = false
 android.accept_sdk_license = True
 
-# تثبيت نسخة python-for-android المستقرة المتوافقة 100% مع Python 3.11 و Cython 0.29.36
 p4a.branch = v2024.01.21
 
 android.add_src = native_java
@@ -35,6 +34,5 @@ android.entrypoint = org.kivy.android.PythonActivity
 android.private_storage = True
 
 [buildozer]
-# وضع 1 لمنع امتلاء سجل GitHub واختفاء آخر الأسطر
-log_level = 1
+log_level = 2
 warn_on_root = 1
