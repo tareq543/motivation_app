@@ -67,18 +67,16 @@ jobs:
 
       - name: Build Debug APK
         run: |
-          set +e
-          yes | buildozer android debug > buildozer_output.log 2>&1
-          BUILD_EXIT=$?
-          grep -E "^(\[INFO\]|\[ERROR\]|\[WARNING\]|# |\[P4A_HOOK\])" buildozer_output.log | tail -n 80
-          if [ $BUILD_EXIT -ne 0 ]; then
+          set -o pipefail
+          yes | buildozer -v android debug 2>&1 | tee buildozer.log || {
             echo "=========================================="
             echo "GRADLE / APK COMPILER ERROR DETAILS:"
             echo "=========================================="
-            grep -B 120 -A 10 "gradlew failed" buildozer_output.log || grep -B 100 -A 5 "# Command failed" buildozer_output.log
-            exit $BUILD_EXIT
-          fi
-
+            cd .buildozer/android/platform/build-arm64-v8a/dists/condblocker
+            ./gradlew assembleDebug --stacktrace --no-daemon
+            exit 1
+          }
+        
       - name: Save Buildozer Cache
         uses: actions/cache/save@v4
         if: always()
