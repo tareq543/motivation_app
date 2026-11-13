@@ -1,11 +1,7 @@
 import glob
 import os
 import shutil
-import xml.etree.ElementTree as ET
-from pythonforandroid.toolchain import info
 
-
-ANDROID_NS = "http://schemas.android.com/apk/res/android"
 
 MANIFEST_INJECTION = """
     <service
@@ -79,7 +75,7 @@ def _find_dist_dirs(toolchain, project_dir: str) -> list[str]:
 
 
 def _inject_into_dist(dist_dir: str, project_dir: str):
-    # 1. نسخ ملفات res/xml إلى مجلد موارد التطبيق
+    # 1. نسخ ملفات res/xml
     src_xml = os.path.join(project_dir, "res", "xml")
     dst_xml = os.path.join(dist_dir, "src", "main", "res", "xml")
     if os.path.isdir(src_xml):
@@ -88,14 +84,24 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
             if fname.endswith(".xml"):
                 shutil.copy2(os.path.join(src_xml, fname), os.path.join(dst_xml, fname))
 
-    # 2. إنشاء ملف condblocker_strings.xml مستقل حتى لا يمسحه p4a عند توليد strings.xml
+    # 2. إضافة ملف النصوص المستقل + تحديث قالب strings.tmpl.xml ليظهر اسم التطبيق بالعربية على الهاتف
     values_dir = os.path.join(dist_dir, "src", "main", "res", "values")
     os.makedirs(values_dir, exist_ok=True)
-    custom_strings_path = os.path.join(values_dir, "condblocker_strings.xml")
-    with open(custom_strings_path, "w", encoding="utf-8") as f:
+    with open(os.path.join(values_dir, "condblocker_strings.xml"), "w", encoding="utf-8") as f:
         f.write(CONDBLOCKER_STRINGS_XML)
 
-    # 3. حقن الخدمات والمستقبلات في قالب AndroidManifest.tmpl.xml قبل أن يولده p4a
+    strings_tmpl = os.path.join(dist_dir, "templates", "strings.tmpl.xml")
+    if os.path.exists(strings_tmpl):
+        with open(strings_tmpl, "r", encoding="utf-8") as f:
+            s_content = f.read()
+        s_content = s_content.replace(
+            '<string name="app_name">{{ args.name }}</string>',
+            '<string name="app_name">الحظر المشروط</string>\n    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق الحظر المشروط من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>',
+        )
+        with open(strings_tmpl, "w", encoding="utf-8") as f:
+            f.write(s_content)
+
+    # 3. حقن الخدمات والمستقبلات في قالب AndroidManifest.tmpl.xml
     tmpl_candidates = [
         os.path.join(dist_dir, "templates", "AndroidManifest.tmpl.xml"),
         os.path.join(dist_dir, "src", "main", "AndroidManifest.xml"),
@@ -112,7 +118,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
                 )
                 with open(tmpl_path, "w", encoding="utf-8") as f:
                     f.write(content)
-                info(f"CondBlocker p4a_hook: injected components into {tmpl_path}")
+                print(f"[P4A_HOOK] Injected Manifest into {tmpl_path}")
 
 
 def before_apk_build(toolchain):
