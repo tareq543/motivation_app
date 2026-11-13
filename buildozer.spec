@@ -15,8 +15,7 @@ source.include_exts = py,png,jpg,kv,atlas,xml,java,json
 version = 1.0.0
 
 # المكتبات والمتطلبات (تم تثبيت python-bidi==0.4.2 لتوافقها الكامل مع أندرويد بدون Rust)
-requirements = python3==3.11.6,kivy==2.3.0,kivymd==1.2.0,pyjnius,sqlite3,arabic-reshaper,python-bidi==0.4.2
-
+requirements = hostpython3==3.11.6,python3==3.11.6,kivy==2.3.0,kivymd==1.2.0,pyjnius,sqlite3,arabic-reshaper,python-bidi==0.4.2
 # اتجاه الشاشة
 orientation = portrait
 fullscreen = 0
