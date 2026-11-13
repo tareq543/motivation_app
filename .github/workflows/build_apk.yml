@@ -32,10 +32,10 @@ jobs:
             zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
             cmake libffi-dev libssl-dev automake gettext ccache
 
-      - name: Install Buildozer, Cython, and Virtualenv
+      - name: Install Buildozer, Cython, and setuptools (with distutils)
         run: |
           python -m pip install --upgrade pip
-          pip install buildozer==1.5.0 cython==0.29.36 virtualenv setuptools packaging
+          pip install buildozer==1.5.0 cython==0.29.36 virtualenv "setuptools==69.5.1" packaging
 
       - name: Restore Buildozer Cache
         uses: actions/cache/restore@v4
@@ -49,18 +49,32 @@ jobs:
             buildozer-v2-${{ runner.os }}-
             buildozer-${{ runner.os }}-
 
+      - name: Sanitize Android SDK build-tools for LooseVersion
+        run: |
+          BT_DIR="$HOME/.buildozer/android/platform/android-sdk/build-tools"
+          if [ -d "$BT_DIR" ]; then
+            rm -rf "$BT_DIR"/*-rc* "$BT_DIR"/35* "$BT_DIR"/36* || true
+          fi
+          SDKMGR=$(find "$HOME/.buildozer/android/platform/android-sdk" -name sdkmanager 2>/dev/null | head -n 1 || true)
+          if [ -n "$SDKMGR" ]; then
+            yes | "$SDKMGR" "build-tools;34.0.0" "platforms;android-34" || true
+          fi
+
       - name: Build Debug APK
         run: |
-          set -o pipefail
-          yes | buildozer android debug 2>&1 | tee buildozer_output.log
+          set +e
+          yes | buildozer android debug > buildozer_output.log 2>&1
+          BUILD_EXIT=$?
+          grep -E "^(\[INFO\]|\[ERROR\]|\[WARNING\]|# |\[P4A_HOOK\])" buildozer_output.log | tail -n 80
+          if [ $BUILD_EXIT -ne 0 ]; then
+            echo "=========================================="
+            echo "EXACT ERROR OUTPUT BEFORE COMMAND FAILED:"
+            echo "=========================================="
+            grep -B 100 -A 2 "# Command failed" buildozer_output.log || tail -n 150 buildozer_output.log
+            exit $BUILD_EXIT
+          fi
 
-      - name: Show Error Tail on Failure
-        if: failure()
-        run: |
-          echo "=== LINES RIGHT BEFORE COMMAND FAILED ==="
-          grep -B 60 -A 5 "Command failed" buildozer_output.log || tail -n 150 buildozer_output.log
-
-      - name: Save Buildozer Cache (Even on Failure)
+      - name: Save Buildozer Cache
         uses: actions/cache/save@v4
         if: always()
         with:
