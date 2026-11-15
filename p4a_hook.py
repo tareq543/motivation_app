@@ -43,19 +43,24 @@ MANIFEST_INJECTION = """
 """
 
 SERVICE_MONITOR_TMPL_RE = re.compile(
-    r'<service\s+android:name="\{\{\s*args\.package\s*\}\}\.Service\{\{\s*service\.name\|capitalize\s*\}\}"[^>]*/>',
+    r'<service\s+android:name="\{\{\s*args\.package\s*\}\}\.Service\{\{\s*([^}]+)\s*\}\}"\s+android:process=":service_\{\{\s*([^}]+)\s*\}\}"[^>]*(?:/>|>\s*</service>)',
     re.DOTALL,
 )
 
-SERVICE_MONITOR_TMPL_REPLACEMENT = """<service android:name="{{ args.package }}.Service{{ service.name|capitalize }}"
-             android:process=":service_{{ service.name }}"
-             android:foregroundServiceType="specialUse"
-             android:exported="false">
-        <property
-            android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-            android:value="Monitoring foreground app usage to enforce user-configured screen time limits" />
-    </service>"""
 
+def _replace_tmpl_service(match):
+    cap_expr = match.group(1).strip()
+    raw_expr = match.group(2).strip()
+    return (
+        f'<service android:name="{{{{ args.package }}}}.Service{{{{ {cap_expr} }}}}"\n'
+        f'             android:process=":service_{{{{ {raw_expr} }}}}"\n'
+        f'             android:foregroundServiceType="specialUse"\n'
+        f'             android:exported="false">\n'
+        f'        <property\n'
+        f'            android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"\n'
+        f'            android:value="Monitoring foreground app usage to enforce user-configured screen time limits" />\n'
+        f'    </service>'
+    )
 SERVICE_MONITOR_XML_RE = re.compile(
     r'<service\s+android:name="org\.guardian\.condblocker\.ServiceMonitor"[^>]*/>',
     re.DOTALL,
