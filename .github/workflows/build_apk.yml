@@ -1,0 +1,106 @@
+name: Build CondBlocker APK
+
+on:
+  workflow_dispatch:
+jobs:
+  build-android:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Install system dependencies for Buildozer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 \
+            cmake libffi-dev libssl-dev automake gettext ccache
+
+      - name: Install Buildozer, Cython, and setuptools (with distutils)
+        run: |
+          python -m pip install --upgrade pip
+          pip install buildozer==1.5.0 cython==0.29.36 virtualenv "setuptools==69.5.1" packaging
+
+      - name: Restore Buildozer Cache
+        uses: actions/cache/restore@v4
+        id: restore-cache
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-v3-${{ runner.os }}-
+            buildozer-v2-${{ runner.os }}-
+
+      - name: Ensure Android SDK tools and build-tools 34.0.0 are installed
+        run: |
+          SDK_DIR="$HOME/.buildozer/android/platform/android-sdk"
+          BT_DIR="$SDK_DIR/build-tools"
+          if [ ! -f "$SDK_DIR/tools/bin/sdkmanager" ]; then
+            CMDLINE=$(find /usr/local/lib/android/sdk/cmdline-tools -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -n 1 || true)
+            if [ -n "$CMDLINE" ] && [ -f "$CMDLINE/bin/sdkmanager" ]; then
+              mkdir -p "$SDK_DIR/tools" "$SDK_DIR/cmdline-tools"
+              cp -rn "$CMDLINE"/* "$SDK_DIR/tools/"
+              cp -rn "$CMDLINE" "$SDK_DIR/cmdline-tools/latest" 2>/dev/null || true
+            else
+              rm -rf "$SDK_DIR"
+            fi
+          fi
+          if [ -d "$SDK_DIR" ]; then
+            mkdir -p "$BT_DIR"
+            rm -rf "$BT_DIR"/*-rc* "$BT_DIR"/35* "$BT_DIR"/36* "$BT_DIR"/37* || true
+            if [ -d "/usr/local/lib/android/sdk/build-tools" ]; then
+              cp -rn /usr/local/lib/android/sdk/build-tools/34* "$BT_DIR"/ 2>/dev/null || true
+            fi
+            SDKMGR="$SDK_DIR/tools/bin/sdkmanager"
+            if [ -f "$SDKMGR" ]; then
+              yes | "$SDKMGR" --sdk_root="$SDK_DIR" --licenses || true
+              yes | "$SDKMGR" --sdk_root="$SDK_DIR" "build-tools;34.0.0" "platforms;android-34" "platform-tools" || true
+            fi
+            echo "Installed build-tools:"
+            ls -la "$BT_DIR"
+          fi
+
+      - name: Build Debug APK
+        run: |
+          set -o pipefail
+          buildozer -v android debug < <(yes 2>/dev/null) 2>&1 | tee buildozer.log || {
+            echo "=========================================="
+            echo "GRADLE / APK COMPILER ERROR DETAILS:"
+            echo "=========================================="
+            DIST_DIR=$(find .buildozer/android/platform -type d -name "condblocker" | grep "/dists/" | head -n 1)
+            if [ -n "$DIST_DIR" ]; then
+              cd "$DIST_DIR"
+              ./gradlew assembleDebug --stacktrace --no-daemon
+            fi
+            exit 1
+          }
+
+      - name: Save Buildozer Cache
+        uses: actions/cache/save@v4
+        if: success()
+        with:
+          path: |
+            .buildozer
+            ~/.buildozer
+          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}-${{ github.run_id }}
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: condblocker-debug-apk
+          path: bin/
