@@ -152,7 +152,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
 
             updated = content
             if "PROPERTY_SPECIAL_USE_FGS_SUBTYPE" not in updated:
-                updated = SERVICE_MONITOR_TMPL_RE.sub(SERVICE_MONITOR_TMPL_REPLACEMENT, updated)
+                updated = SERVICE_MONITOR_TMPL_RE.sub(_replace_tmpl_service, updated)
                 updated = SERVICE_MONITOR_XML_RE.sub(SERVICE_MONITOR_XML_REPLACEMENT, updated)
 
             if "AppBlockerAccessibilityService" not in updated and "</application>" in updated:
