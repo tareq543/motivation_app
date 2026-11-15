@@ -46,21 +46,34 @@ jobs:
             buildozer-v2-${{ runner.os }}-
             buildozer-${{ runner.os }}-
 
-      - name: Ensure Android SDK build-tools 34.0.0 is installed
+      - name: Ensure Android SDK tools and build-tools 34.0.0 are installed
         run: |
           SDK_DIR="$HOME/.buildozer/android/platform/android-sdk"
           BT_DIR="$SDK_DIR/build-tools"
-          mkdir -p "$BT_DIR"
-          rm -rf "$BT_DIR"/*-rc* "$BT_DIR"/35* "$BT_DIR"/36* || true
-          if [ -d "/usr/local/lib/android/sdk/build-tools" ]; then
-            cp -rn /usr/local/lib/android/sdk/build-tools/34* "$BT_DIR"/ 2>/dev/null || true
+          if [ ! -f "$SDK_DIR/tools/bin/sdkmanager" ]; then
+            CMDLINE=$(find /usr/local/lib/android/sdk/cmdline-tools -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -n 1 || true)
+            if [ -n "$CMDLINE" ] && [ -f "$CMDLINE/bin/sdkmanager" ]; then
+              mkdir -p "$SDK_DIR/tools" "$SDK_DIR/cmdline-tools"
+              cp -rn "$CMDLINE"/* "$SDK_DIR/tools/"
+              cp -rn "$CMDLINE" "$SDK_DIR/cmdline-tools/latest" 2>/dev/null || true
+            else
+              rm -rf "$SDK_DIR"
+            fi
           fi
-          SDKMGR=$(find /usr/local/lib/android/sdk "$SDK_DIR" -name sdkmanager 2>/dev/null | head -n 1 || true)
-          if [ -n "$SDKMGR" ]; then
-            yes | "$SDKMGR" --sdk_root="$SDK_DIR" "build-tools;34.0.0" "platforms;android-34" "platform-tools" || true
+          if [ -d "$SDK_DIR" ]; then
+            mkdir -p "$BT_DIR"
+            rm -rf "$BT_DIR"/*-rc* "$BT_DIR"/35* "$BT_DIR"/36* || true
+            if [ -d "/usr/local/lib/android/sdk/build-tools" ]; then
+              cp -rn /usr/local/lib/android/sdk/build-tools/34* "$BT_DIR"/ 2>/dev/null || true
+            fi
+            SDKMGR="$SDK_DIR/tools/bin/sdkmanager"
+            if [ -f "$SDKMGR" ]; then
+              yes | "$SDKMGR" --sdk_root="$SDK_DIR" --licenses || true
+              yes | "$SDKMGR" --sdk_root="$SDK_DIR" "build-tools;34.0.0" "platforms;android-34" "platform-tools" || true
+            fi
+            echo "Installed build-tools:"
+            ls -la "$BT_DIR"
           fi
-          echo "Installed build-tools:"
-          ls -la "$BT_DIR"
 
       - name: Build Debug APK
         run: |
