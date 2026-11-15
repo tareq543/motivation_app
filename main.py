@@ -1631,9 +1631,9 @@ class CondBlockerApp(MDApp):
         Window.bind(on_keyboard=self._on_back_button)
         if IS_ANDROID:
             try:
-                from android.permissions import request_permissions, Permission, check_permission
+                from android.permissions import request_permissions, check_permission
                 if not check_permission("android.permission.POST_NOTIFICATIONS"):
-                    request_permissions([Permission.POST_NOTIFICATIONS], lambda *a: None)
+                    request_permissions(["android.permission.POST_NOTIFICATIONS"], lambda *a: None)
             except Exception as e:
                 print(f"[PERMS] POST_NOTIFICATIONS skipped: {e}")
 
