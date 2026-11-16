@@ -1699,5 +1699,20 @@ class CondBlockerApp(MDApp):
             print(f"[SERVICE] ❌ {e}")
 
 
+def _write_crash_log(tb_text: str):
+    try:
+        base = os.environ.get("ANDROID_PRIVATE") or os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base, "crash_log.txt")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {datetime.now().isoformat()} =====\n{tb_text}\n")
+        print(f"[CRASH] written to {path}")
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
-    CondBlockerApp().run()
+    try:
+        CondBlockerApp().run()
+    except BaseException:
+        _write_crash_log(traceback.format_exc())
+        raise
