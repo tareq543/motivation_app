@@ -20,7 +20,11 @@ if IS_ANDROID:
         FileOutputStream = autoclass("java.io.FileOutputStream")
         JNIUS_OK = True
     except Exception:
+        # If any class is missing we degrade to desktop behaviour instead of
+        # dying here: this module is imported at startup, before any Kivy code
+        # or error handler exists, so an exception would kill the app silently.
         import traceback
+
         traceback.print_exc()
         JNIUS_OK = False
         IS_ANDROID = False
@@ -30,7 +34,6 @@ else:
 EVENT_FOREGROUND = 1   # MOVE_TO_FOREGROUND / ACTIVITY_RESUMED
 EVENT_BACKGROUND = 2   # MOVE_TO_BACKGROUND / ACTIVITY_PAUSED
 EVENT_STOPPED = 23     # ACTIVITY_STOPPED (Android 10+)
-
 
 
 def get_android_clocks() -> tuple[int, int]:
