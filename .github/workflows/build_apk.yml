@@ -97,70 +97,124 @@ jobs:
           buildozer -v android debug < <(yes 2>/dev/null) 2>&1 | tee buildozer.log
 
       # ---- Fail here instead of shipping an APK that installs then dies ----
-      # NOTE: never pipe a big listing into `grep -q`: grep exits on first match,
-      # tar/unzip then die with SIGPIPE (141) and `pipefail` turns that into a
-      # false "missing" error. Always list to a file, then grep the file.
+      # p4a layout (v2024.01.21): app files live in assets/private.tar, while the
+      # Python packages live in lib/<abi>/libpybundle.so (a gzipped tar despite
+      # the .so extension). Never pipe a big listing into `grep -q` either:
+      # grep exits on first match, tar dies with SIGPIPE (141) and `pipefail`
+      # turns that into a false "missing" error.
       - name: Sanity check APK contents
         id: sanity
         run: |
           set -euo pipefail
-          APK=$(ls -1 bin/*.apk | head -n 1)
-          echo "APK: $APK ($(du -h "$APK" | cut -f1))"
+          python - <<'PYTHON'
+          import re
+          import tarfile
+          import zipfile
+          from pathlib import Path
 
-          unzip -l "$APK" > /tmp/apk.lst
-          for f in "lib/arm64-v8a/libpython3" "lib/arm64-v8a/libSDL2" "assets/private.tar"; do
-            grep -qF "$f" /tmp/apk.lst || { echo "::error::$f missing from APK"; exit 1; }
-            echo "ok:   $f"
-          done
+          def require(condition, message):
+              if not condition:
+                  raise SystemExit(f"::error::{message}")
+              print(f"ok: {message}", flush=True)
 
-          unzip -p "$APK" assets/private.tar > /tmp/private.tar
-          tar -tf /tmp/private.tar > /tmp/private.lst
-          echo "private.tar entries: $(wc -l < /tmp/private.lst)"
-          echo "top-level entries:"
-          awk -F/ 'NF>1 {print $1"/"}' /tmp/private.lst | sort -u | head -20
+          def tar_entries(apk, member):
+              with apk.open(member) as stream:
+                  with tarfile.open(fileobj=stream, mode="r|*") as archive:
+                      return {item.name for item in archive if item.isfile()}
 
-          FAIL=0
-          check() {
-            if grep -qE "$1" /tmp/private.lst; then
-              echo "ok:   $2"
-            else
-              echo "::error::$2 missing from private.tar"
-              FAIL=1
-            fi
-          }
-          check '(^|/)kivymd/__init__\.pyc?$' 'kivymd'
-          check '(^|/)jnius/[^/]*\.pyc?$'     'pyjnius'
-          check '(^|/)main\.pyc?$'            'entrypoint main.py'
-          check 'fonts/arabic\.(ttf|ttc)$'     'Arabic font'
-          if [ "$FAIL" != "0" ]; then
-            echo '--- first 40 entries ---'
-            head -40 /tmp/private.lst
-            echo '--- entries matching kivymd ---'
-            grep -i kivymd /tmp/private.lst | head -10 || true
+          apks = sorted(Path("bin").glob("*.apk"))
+          require(bool(apks), "APK exists")
+
+          for path in apks:
+              print(f"Checking {path}", flush=True)
+              with zipfile.ZipFile(path) as apk:
+                  names = set(apk.namelist())
+
+                  require("assets/private.tar" in names, "app archive exists")
+                  app = tar_entries(apk, "assets/private.tar")
+
+                  require(
+                      any(re.search(r"(^|/)main\.pyc?$", n) for n in app),
+                      "main.py/main.pyc in private.tar",
+                  )
+                  require(
+                      any(n.endswith("assets/fonts/arabic.ttf") for n in app),
+                      "Arabic font in private.tar",
+                  )
+
+                  for abi in ("arm64-v8a", "armeabi-v7a"):
+                      prefix = f"lib/{abi}/"
+
+                      require(
+                          any(
+                              n.startswith(prefix + "libpython3")
+                              and n.endswith(".so")
+                              for n in names
+                          ),
+                          f"{abi}: libpython",
+                      )
+                      require(
+                          prefix + "libSDL2.so" in names,
+                          f"{abi}: libSDL2",
+                      )
+
+                      bundle = prefix + "libpybundle.so"
+                      require(bundle in names, f"{abi}: Python bundle exists")
+                      packages = tar_entries(apk, bundle)
+
+                      print(
+                          f"{abi}: {len(packages)} files in Python bundle",
+                          flush=True,
+                      )
+
+                      for package in ("kivy", "kivymd", "jnius"):
+                          pattern = rf"(^|/){package}/__init__\.pyc?$"
+                          require(
+                              any(re.search(pattern, n) for n in packages),
+                              f"{abi}: {package} in Python bundle",
+                          )
+
+                      require(
+                          any(
+                              re.search(
+                                  r"(^|/)(jnius/[^/]*\.so|jnius[^/]*\.so)$",
+                                  n,
+                              )
+                              for n in packages
+                          ),
+                          f"{abi}: pyjnius native extension",
+                      )
+          PYTHON
+
+          shopt -s nullglob
+          AAPT2=("$HOME"/.buildozer/android/platform/android-sdk/build-tools/*/aapt2)
+
+          if [ "${#AAPT2[@]}" -eq 0 ]; then
+            echo "::error::aapt2 not found"
             exit 1
           fi
 
-          AAPT2=$(ls "$HOME"/.buildozer/android/platform/android-sdk/build-tools/*/aapt2 2>/dev/null | head -n 1 || true)
-          if [ -n "$AAPT2" ]; then
-            "$AAPT2" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/manifest.txt
-            for f in AppBlockerAccessibilityService foregroundServiceType BootReceiver; do
-              grep -qF "$f" /tmp/manifest.txt \
-                || { echo "::error::$f missing from AndroidManifest.xml (p4a_hook did not apply)"; exit 1; }
-              echo "ok:   manifest $f"
+          for APK in bin/*.apk; do
+            "${AAPT2[0]}" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/condblocker-manifest.txt
+
+            for ITEM in AppBlockerAccessibilityService foregroundServiceType BootReceiver; do
+              grep -qF "$ITEM" /tmp/condblocker-manifest.txt || {
+                echo "::error::$ITEM missing from AndroidManifest.xml"
+                exit 1
+              }
+              echo "ok: manifest $ITEM"
             done
-          else
-            echo '::warning::aapt2 not found, skipped manifest checks'
-          fi
+          done
 
       - name: Save toolchain cache
-        if: ${{ steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/cache/save@v4
         with:
           path: ~/.buildozer
           key: toolchain-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: Save dist cache
-        if: ${{ steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/cache/save@v4
         with:
           path: .buildozer
@@ -176,7 +230,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload APK Artifact
-        if: ${{ steps.build.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: condblocker-debug-apk
