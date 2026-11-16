@@ -4,15 +4,23 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
+import android.util.Log;
 
 public class BootReceiver extends BroadcastReceiver {
+
+    private static final String TAG = "CondBlocker";
+
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (intent == null || intent.getAction() == null) return;
+        if (intent == null || intent.getAction() == null) {
+            return;
+        }
+
         String action = intent.getAction();
         if (Intent.ACTION_BOOT_COMPLETED.equals(action)
                 || Intent.ACTION_LOCKED_BOOT_COMPLETED.equals(action)
                 || "android.intent.action.QUICKBOOT_POWERON".equals(action)) {
+
             try {
                 Class<?> serviceCls = Class.forName(context.getPackageName() + ".ServiceMonitor");
                 Intent svcIntent = new Intent(context, serviceCls);
@@ -21,7 +29,13 @@ public class BootReceiver extends BroadcastReceiver {
                 } else {
                     context.startService(svcIntent);
                 }
-            } catch (Exception ignored) {
+            } catch (Exception e) {
+                Log.e(TAG, "boot start failed", e);
+                try {
+                    Class<?> serviceCls = Class.forName(context.getPackageName() + ".ServiceMonitor");
+                    context.startService(new Intent(context, serviceCls));
+                } catch (Exception ignored) {
+                }
             }
         }
     }
