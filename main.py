@@ -638,7 +638,7 @@ def notify_snack(msg: str):
     if IS_ANDROID:
         try:
             act = PythonActivity.mActivity
-                        if act is not None:
+            if act is not None:
                 from jnius import PythonJavaClass, java_method
 
                 class _ToastRunnable(PythonJavaClass):
@@ -659,6 +659,28 @@ def notify_snack(msg: str):
                             ).show()
                         except Exception:
                             pass
+
+                act.runOnUiThread(_ToastRunnable(msg))
+                return
+        except Exception:
+            traceback.print_exc()
+    try:
+        dlg = MDDialog(
+            title=ar("تنبيه"),
+            text=ar(msg),
+            md_bg_color=THEME["card"],
+            buttons=[
+                MDFlatButton(
+                    text=ar("حسناً"),
+                    font_name=ARABIC_FONT,
+                    on_release=lambda *a: dlg.dismiss(),
+                )
+            ],
+        )
+        dlg.open()
+    except Exception:
+        print(f"[NOTIFY] {msg}")
+
 
                 act.runOnUiThread(_ToastRunnable(msg))
                 return
