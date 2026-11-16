@@ -209,9 +209,9 @@ class CondBlockerDB:
                     trusted_wall = now_wall_ms
                     wall_offset = 0
                     clock_tampered = 0
-                elif now_elapsed >= last_elapsed:
+                elif now_elapsed_ms >= last_elapsed:
                     # نفس جلسة التشغيل (لم يتم إعادة تشغيل الهاتف)
-                    real_delta_ms = now_elapsed - last_elapsed
+                    real_delta_ms = now_elapsed_ms - last_elapsed
                     delta_sec = real_delta_ms / 1000.0
                     trusted_wall = trusted_wall + real_delta_ms
 
@@ -233,7 +233,7 @@ class CondBlockerDB:
                         wall_offset = 0
                 else:
                     # حدثت إعادة تشغيل للهاتف (elapsedRealtime عاد إلى 0)
-                    boot_elapsed_ms = now_elapsed
+                    boot_elapsed_ms = now_elapsed_ms
                     wall_gap_ms = now_wall_ms - last_wall
                     if (
                         clock_tampered == 0
