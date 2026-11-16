@@ -682,28 +682,6 @@ def notify_snack(msg: str):
         print(f"[NOTIFY] {msg}")
 
 
-                act.runOnUiThread(_ToastRunnable(msg))
-                return
-        except Exception:
-            pass
-    try:
-        dlg = MDDialog(
-            title=ar("تنبيه"),
-            text=ar(msg),
-            md_bg_color=THEME["card"],
-            buttons=[
-                MDFlatButton(
-                    text=ar("حسناً"),
-                    font_name=ARABIC_FONT,
-                    on_release=lambda *a: dlg.dismiss(),
-                )
-            ],
-        )
-        dlg.open()
-    except Exception:
-        print(f"[NOTIFY] {msg}")
-
-
 class PermissionBridge:
     """فحص وتوجيه المستخدم لتفعيل الصلاحيات الأربع الأساسية."""
 
