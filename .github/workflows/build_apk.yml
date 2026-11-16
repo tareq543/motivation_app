@@ -2,6 +2,7 @@ name: Build CondBlocker APK
 
 on:
   workflow_dispatch:
+
 jobs:
   build-android:
     runs-on: ubuntu-22.04
@@ -34,17 +35,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer==1.5.0 cython==0.29.36 virtualenv "setuptools==69.5.1" packaging
 
-      - name: Restore Buildozer Cache
+      # ---- Cache 1: only the SDK/NDK + downloads (safe to share between builds) ----
+      - name: Restore toolchain cache
         uses: actions/cache/restore@v4
-        id: restore-cache
         with:
-          path: |
-            .buildozer
-            ~/.buildozer
-          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          path: ~/.buildozer
+          key: toolchain-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
           restore-keys: |
-            buildozer-v3-${{ runner.os }}-
-            buildozer-v2-${{ runner.os }}-
+            toolchain-v1-${{ runner.os }}-
+
+      # ---- Cache 2: the p4a dist. EXACT key only, no restore-keys, so a stale
+      #      dist compiled from different requirements can never be reused. ----
+      - name: Restore dist cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .buildozer
+          key: dist-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: Ensure Android SDK tools and build-tools 34.0.0 are installed
         run: |
@@ -75,32 +81,75 @@ jobs:
             ls -la "$BT_DIR"
           fi
 
+      # ---- No gradle fallback: that path skipped p4a_hook.py and shipped a
+      #      manifest without the accessibility service / FGS type. ----
       - name: Build Debug APK
         run: |
           set -o pipefail
-          buildozer -v android debug < <(yes 2>/dev/null) 2>&1 | tee buildozer.log || {
-            echo "=========================================="
-            echo "GRADLE / APK COMPILER ERROR DETAILS:"
-            echo "=========================================="
-            DIST_DIR=$(find .buildozer/android/platform -type d -name "condblocker" | grep "/dists/" | head -n 1)
-            if [ -n "$DIST_DIR" ]; then
-              cd "$DIST_DIR"
-              ./gradlew assembleDebug --stacktrace --no-daemon
-            fi
-            exit 1
-          }
+          buildozer -v android debug < <(yes 2>/dev/null) 2>&1 | tee buildozer.log
 
-      - name: Save Buildozer Cache
-        uses: actions/cache/save@v4
+      # ---- Fail here instead of shipping an APK that installs then dies ----
+      - name: Sanity check APK contents
+        run: |
+          set -euo pipefail
+          APK=$(ls -1 bin/*.apk | head -n 1)
+          echo "APK: $APK ($(du -h "$APK" | cut -f1))"
+
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libpython3" \
+            || { echo "::error::libpython missing from APK"; exit 1; }
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libSDL2" \
+            || { echo "::error::libSDL2 missing from APK"; exit 1; }
+
+          unzip -p "$APK" assets/private.tar > /tmp/private.tar
+          tar -tf /tmp/private.tar | grep -q "site-packages/kivymd/__init__.py" \
+            || { echo "::error::kivymd missing from private.tar"; exit 1; }
+          tar -tf /tmp/private.tar | grep -qE "(^|/)main\.pyc?$" \
+            || { echo "::error::entrypoint main.py missing from private.tar"; exit 1; }
+          tar -tf /tmp/private.tar | grep -q "site-packages/jnius" \
+            || { echo "::error::pyjnius missing from private.tar"; exit 1; }
+          tar -tf /tmp/private.tar | grep -q "assets/fonts/arabic.ttf" \
+            || { echo "::error::bundled Arabic font missing"; exit 1; }
+
+          AAPT2=$(ls "$HOME"/.buildozer/android/platform/android-sdk/build-tools/*/aapt2 2>/dev/null | head -n 1 || true)
+          if [ -n "$AAPT2" ]; then
+            "$AAPT2" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/manifest.txt
+            grep -q "AppBlockerAccessibilityService" /tmp/manifest.txt \
+              || { echo "::error::p4a_hook did not inject the accessibility service"; exit 1; }
+            grep -q "foregroundServiceType" /tmp/manifest.txt \
+              || { echo "::error::foregroundServiceType missing - Android 14 will kill the service"; exit 1; }
+            grep -q "BootReceiver" /tmp/manifest.txt \
+              || { echo "::error::BootReceiver missing from manifest"; exit 1; }
+            echo "manifest checks passed"
+          else
+            echo "::warning::aapt2 not found, skipped manifest checks"
+          fi
+
+      - name: Save toolchain cache
         if: success()
+        uses: actions/cache/save@v4
         with:
+          path: ~/.buildozer
+          key: toolchain-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+
+      - name: Save dist cache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: .buildozer
+          key: dist-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-log
           path: |
-            .buildozer
-            ~/.buildozer
-          key: buildozer-v3-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}-${{ github.run_id }}
+            buildozer.log
+          if-no-files-found: warn
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: condblocker-debug-apk
-          path: bin/
+          path: bin/*.apk
+          if-no-files-found: error
