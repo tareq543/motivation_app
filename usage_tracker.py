@@ -4,27 +4,33 @@ import time
 IS_ANDROID = "ANDROID_ARGUMENT" in os.environ
 
 if IS_ANDROID:
-    from jnius import autoclass
+    try:
+        from jnius import autoclass
 
-    Context = autoclass("android.content.Context")
-    Intent = autoclass("android.content.Intent")
-    PackageManager = autoclass("android.content.pm.PackageManager")
-    UsageEventsEvent = autoclass("android.app.usage.UsageEvents$Event")
-    SystemClock = autoclass("android.os.SystemClock")
-    System = autoclass("java.lang.System")
-    Bitmap = autoclass("android.graphics.Bitmap")
-    BitmapConfig = autoclass("android.graphics.Bitmap$Config")
-    CompressFormat = autoclass("android.graphics.Bitmap$CompressFormat")
-    Canvas = autoclass("android.graphics.Canvas")
-    FileOutputStream = autoclass("java.io.FileOutputStream")
-
-    EVENT_FOREGROUND = 1   # MOVE_TO_FOREGROUND / ACTIVITY_RESUMED
-    EVENT_BACKGROUND = 2   # MOVE_TO_BACKGROUND / ACTIVITY_PAUSED
-    EVENT_STOPPED = 23     # ACTIVITY_STOPPED (Android 10+)
+        Context = autoclass("android.content.Context")
+        Intent = autoclass("android.content.Intent")
+        PackageManager = autoclass("android.content.pm.PackageManager")
+        UsageEventsEvent = autoclass("android.app.usage.UsageEvents$Event")
+        SystemClock = autoclass("android.os.SystemClock")
+        System = autoclass("java.lang.System")
+        Bitmap = autoclass("android.graphics.Bitmap")
+        BitmapConfig = autoclass("android.graphics.Bitmap$Config")
+        CompressFormat = autoclass("android.graphics.Bitmap$CompressFormat")
+        Canvas = autoclass("android.graphics.Canvas")
+        FileOutputStream = autoclass("java.io.FileOutputStream")
+        JNIUS_OK = True
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        JNIUS_OK = False
+        IS_ANDROID = False
 else:
-    EVENT_FOREGROUND = 1
-    EVENT_BACKGROUND = 2
-    EVENT_STOPPED = 23
+    JNIUS_OK = False
+
+EVENT_FOREGROUND = 1   # MOVE_TO_FOREGROUND / ACTIVITY_RESUMED
+EVENT_BACKGROUND = 2   # MOVE_TO_BACKGROUND / ACTIVITY_PAUSED
+EVENT_STOPPED = 23     # ACTIVITY_STOPPED (Android 10+)
+
 
 
 def get_android_clocks() -> tuple[int, int]:
