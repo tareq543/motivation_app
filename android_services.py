@@ -408,6 +408,7 @@ def run_monitor_service():
         "الحظر المشروط نشط",
         "الحماية الصارمة ومراقبة الاستخدام تعمل في الخلفية",
     )
+    # ---- CHANGE 1: never let a foreground-service exception kill the monitor ----
     if BuildVersion.SDK_INT >= 34:
         try:
             service.startForeground(
@@ -416,13 +417,28 @@ def run_monitor_service():
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         except Exception:
-            service.startForeground(NOTIFICATION_ID, notif)
+            traceback.print_exc()
+            try:
+                service.startForeground(NOTIFICATION_ID, notif)
+            except Exception:
+                traceback.print_exc()
     else:
-        service.startForeground(NOTIFICATION_ID, notif)
+        try:
+            service.startForeground(NOTIFICATION_ID, notif)
+        except Exception:
+            traceback.print_exc()
 
-    pm = service.getSystemService(Context.POWER_SERVICE)
-    wake_lock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "CondBlocker::MonitorWakeLock")
-    wake_lock.acquire()
+    # ---- CHANGE 2: a wake-lock failure must not kill the monitor ----
+    wake_lock = None
+    try:
+        pm = service.getSystemService(Context.POWER_SERVICE)
+        wake_lock = pm.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK, "CondBlocker::MonitorWakeLock"
+        )
+        wake_lock.acquire()
+    except Exception:
+        traceback.print_exc()
+        wake_lock = None
 
     my_pkg = str(service.getPackageName())
     last_notif_update = 0.0
@@ -433,7 +449,7 @@ def run_monitor_service():
                 now_elapsed, now_wall = get_android_clocks()
                 lock_info = db.sync_monotonic_clock(now_elapsed, now_wall)
 
-                evaluations, blocked_targets, _ = tracker.evaluate_all_rules(db)
+                evaluations, blocked_targets, usage_sec = tracker.evaluate_all_rules(db)
                 db.export_blocker_state(state_json_path, list(blocked_targets.keys()))
 
                 # قراءة التطبيق المفتوح (أولوية لملف Accessibility الفوري، ثم UsageStatsManager)
@@ -457,17 +473,27 @@ def run_monitor_service():
                         txt = f"نافذة التعديل مفتوحة: {format_hhmmss(lock_info['remaining_seconds'])}"
                     else:
                         txt = f"الحماية الصارمة مفعلة | تطبيقات محظورة: {len(blocked_targets)}"
-                    updated_notif, _ = _create_notification(service, "الحظر المشروط", txt)
-                    nm.notify(NOTIFICATION_ID, updated_notif)
+                    try:
+                        updated_notif, _ = _create_notification(service, "الحظر المشروط", txt)
+                        nm.notify(NOTIFICATION_ID, updated_notif)
+                    except Exception:
+                        traceback.print_exc()
 
             except Exception:
                 traceback.print_exc()
 
             time.sleep(0.5)
     finally:
-        overlay_mgr.hide()
-        if wake_lock.isHeld():
-            wake_lock.release()
+        try:
+            overlay_mgr.hide()
+        except Exception:
+            pass
+        # ---- CHANGE 3: release only if we really hold it ----
+        try:
+            if wake_lock is not None and wake_lock.isHeld():
+                wake_lock.release()
+        except Exception:
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
