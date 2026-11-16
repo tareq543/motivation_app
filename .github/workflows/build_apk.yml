@@ -35,6 +35,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer==1.5.0 cython==0.29.36 virtualenv "setuptools==69.5.1" packaging
 
+      - name: Syntax check Python sources
+        run: |
+          python -m py_compile main.py database.py usage_tracker.py \
+            android_services.py service.py p4a_hook.py
+
+      
       # ---- Cache 1: only the SDK/NDK + downloads (safe to share between builds) ----
       - name: Restore toolchain cache
         uses: actions/cache/restore@v4
