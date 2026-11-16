@@ -35,12 +35,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer==1.5.0 cython==0.29.36 virtualenv "setuptools==69.5.1" packaging
 
+      # ---- Fails in ~2s instead of after a 40min build (this is what broke run #6) ----
       - name: Syntax check Python sources
         run: |
           python -m py_compile main.py database.py usage_tracker.py \
             android_services.py service.py p4a_hook.py
+          echo "syntax check passed"
 
-      
       # ---- Cache 1: only the SDK/NDK + downloads (safe to share between builds) ----
       - name: Restore toolchain cache
         uses: actions/cache/restore@v4
@@ -87,58 +88,79 @@ jobs:
             ls -la "$BT_DIR"
           fi
 
-      # ---- No gradle fallback: that path skipped p4a_hook.py and shipped a
-      #      manifest without the accessibility service / FGS type. ----
+      # ---- No gradle fallback: that path skipped p4a_hook.py and shipped an APK
+      #      built from a wiped assets/ dir, which installs then dies instantly. ----
       - name: Build Debug APK
+        id: build
         run: |
           set -o pipefail
           buildozer -v android debug < <(yes 2>/dev/null) 2>&1 | tee buildozer.log
 
       # ---- Fail here instead of shipping an APK that installs then dies ----
+      # NOTE: never pipe a big listing into `grep -q`: grep exits on first match,
+      # tar/unzip then die with SIGPIPE (141) and `pipefail` turns that into a
+      # false "missing" error. Always list to a file, then grep the file.
       - name: Sanity check APK contents
+        id: sanity
         run: |
           set -euo pipefail
           APK=$(ls -1 bin/*.apk | head -n 1)
           echo "APK: $APK ($(du -h "$APK" | cut -f1))"
 
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libpython3" \
-            || { echo "::error::libpython missing from APK"; exit 1; }
-          unzip -l "$APK" | grep -q "lib/arm64-v8a/libSDL2" \
-            || { echo "::error::libSDL2 missing from APK"; exit 1; }
+          unzip -l "$APK" > /tmp/apk.lst
+          for f in "lib/arm64-v8a/libpython3" "lib/arm64-v8a/libSDL2" "assets/private.tar"; do
+            grep -qF "$f" /tmp/apk.lst || { echo "::error::$f missing from APK"; exit 1; }
+            echo "ok:   $f"
+          done
 
           unzip -p "$APK" assets/private.tar > /tmp/private.tar
-          tar -tf /tmp/private.tar | grep -q "site-packages/kivymd/__init__.py" \
-            || { echo "::error::kivymd missing from private.tar"; exit 1; }
-          tar -tf /tmp/private.tar | grep -qE "(^|/)main\.pyc?$" \
-            || { echo "::error::entrypoint main.py missing from private.tar"; exit 1; }
-          tar -tf /tmp/private.tar | grep -q "site-packages/jnius" \
-            || { echo "::error::pyjnius missing from private.tar"; exit 1; }
-          tar -tf /tmp/private.tar | grep -q "assets/fonts/arabic.ttf" \
-            || { echo "::error::bundled Arabic font missing"; exit 1; }
+          tar -tf /tmp/private.tar > /tmp/private.lst
+          echo "private.tar entries: $(wc -l < /tmp/private.lst)"
+          echo "top-level entries:"
+          awk -F/ 'NF>1 {print $1"/"}' /tmp/private.lst | sort -u | head -20
+
+          FAIL=0
+          check() {
+            if grep -qE "$1" /tmp/private.lst; then
+              echo "ok:   $2"
+            else
+              echo "::error::$2 missing from private.tar"
+              FAIL=1
+            fi
+          }
+          check '(^|/)kivymd/__init__\.pyc?$' 'kivymd'
+          check '(^|/)jnius/[^/]*\.pyc?$'     'pyjnius'
+          check '(^|/)main\.pyc?$'            'entrypoint main.py'
+          check 'fonts/arabic\.(ttf|ttc)$'     'Arabic font'
+          if [ "$FAIL" != "0" ]; then
+            echo '--- first 40 entries ---'
+            head -40 /tmp/private.lst
+            echo '--- entries matching kivymd ---'
+            grep -i kivymd /tmp/private.lst | head -10 || true
+            exit 1
+          fi
 
           AAPT2=$(ls "$HOME"/.buildozer/android/platform/android-sdk/build-tools/*/aapt2 2>/dev/null | head -n 1 || true)
           if [ -n "$AAPT2" ]; then
             "$AAPT2" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/manifest.txt
-            grep -q "AppBlockerAccessibilityService" /tmp/manifest.txt \
-              || { echo "::error::p4a_hook did not inject the accessibility service"; exit 1; }
-            grep -q "foregroundServiceType" /tmp/manifest.txt \
-              || { echo "::error::foregroundServiceType missing - Android 14 will kill the service"; exit 1; }
-            grep -q "BootReceiver" /tmp/manifest.txt \
-              || { echo "::error::BootReceiver missing from manifest"; exit 1; }
-            echo "manifest checks passed"
+            for f in AppBlockerAccessibilityService foregroundServiceType BootReceiver; do
+              grep -qF "$f" /tmp/manifest.txt \
+                || { echo "::error::$f missing from AndroidManifest.xml (p4a_hook did not apply)"; exit 1; }
+              echo "ok:   manifest $f"
+            done
           else
-            echo "::warning::aapt2 not found, skipped manifest checks"
+            echo '::warning::aapt2 not found, skipped manifest checks'
           fi
 
       - name: Save toolchain cache
-        if: success()
+        if: ${{ steps.build.outcome == 'success' }}
         uses: actions/cache/save@v4
         with:
           path: ~/.buildozer
           key: toolchain-v1-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
 
       - name: Save dist cache
-        if: success()
+        if: ${{ steps.build.outcome == 'success' }}
         uses: actions/cache/save@v4
         with:
           path: .buildozer
@@ -154,6 +176,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload APK Artifact
+        if: ${{ steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: condblocker-debug-apk
