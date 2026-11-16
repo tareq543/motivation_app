@@ -638,17 +638,29 @@ def notify_snack(msg: str):
     if IS_ANDROID:
         try:
             act = PythonActivity.mActivity
-            if act is not None:
-                def _show_toast():
-                    try:
-                        Toast.makeText(
-                            act.getApplicationContext(),
-                            JString(str(msg)),
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                    except Exception:
-                        pass
-                act.runOnUiThread(_show_toast)
+                        if act is not None:
+                from jnius import PythonJavaClass, java_method
+
+                class _ToastRunnable(PythonJavaClass):
+                    __javainterfaces__ = ["java/lang/Runnable"]
+                    __javacontext__ = "app"
+
+                    def __init__(self, text):
+                        super().__init__()
+                        self.text = text
+
+                    @java_method("()V")
+                    def run(self):
+                        try:
+                            Toast.makeText(
+                                act.getApplicationContext(),
+                                JString(str(self.text)),
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        except Exception:
+                            pass
+
+                act.runOnUiThread(_ToastRunnable(msg))
                 return
         except Exception:
             pass
