@@ -349,7 +349,7 @@ def _create_notification(service, title: str, text: str):
     if BuildVersion.SDK_INT >= 26:
         channel = NotificationChannel(
             CHANNEL_ID,
-            "خدمة مراقبة الحظر المشروط",
+            "خدمة مراقبة Motivator",
             NotificationManager.IMPORTANCE_LOW,
         )
         nm.createNotificationChannel(channel)
@@ -396,7 +396,7 @@ def run_monitor_service():
         pass
 
     files_dir = str(service.getFilesDir().getAbsolutePath())
-    db_path = os.path.join(files_dir, "condblocker.db")
+    db_path = os.path.join(files_dir, "motivator.db")
     state_json_path = os.path.join(files_dir, "blocker_state.json")
 
     db = CondBlockerDB(db_path)
@@ -408,7 +408,6 @@ def run_monitor_service():
         "الحظر المشروط نشط",
         "الحماية الصارمة ومراقبة الاستخدام تعمل في الخلفية",
     )
-    # ---- CHANGE 1: never let a foreground-service exception kill the monitor ----
     if BuildVersion.SDK_INT >= 34:
         try:
             service.startForeground(
@@ -428,12 +427,11 @@ def run_monitor_service():
         except Exception:
             traceback.print_exc()
 
-    # ---- CHANGE 2: a wake-lock failure must not kill the monitor ----
     wake_lock = None
     try:
         pm = service.getSystemService(Context.POWER_SERVICE)
         wake_lock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK, "CondBlocker::MonitorWakeLock"
+            PowerManager.PARTIAL_WAKE_LOCK, "Motivator::MonitorWakeLock"
         )
         wake_lock.acquire()
     except Exception:
@@ -449,7 +447,7 @@ def run_monitor_service():
                 now_elapsed, now_wall = get_android_clocks()
                 lock_info = db.sync_monotonic_clock(now_elapsed, now_wall)
 
-                evaluations, blocked_targets, usage_sec = tracker.evaluate_all_rules(db)
+                evaluations, blocked_targets, _ = tracker.evaluate_all_rules(db)
                 db.export_blocker_state(state_json_path, list(blocked_targets.keys()))
 
                 # قراءة التطبيق المفتوح (أولوية لملف Accessibility الفوري، ثم UsageStatsManager)
@@ -488,7 +486,6 @@ def run_monitor_service():
             overlay_mgr.hide()
         except Exception:
             pass
-        # ---- CHANGE 3: release only if we really hold it ----
         try:
             if wake_lock is not None and wake_lock.isHeld():
                 wake_lock.release()

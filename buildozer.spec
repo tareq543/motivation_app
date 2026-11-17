@@ -1,8 +1,8 @@
 [app]
 
-title = CondBlocker
-package.name = condblocker
-package.domain = org.guardian
+title = Motivator
+package.name = motivator
+package.domain = com.tareq
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,xml,java,json,ttf

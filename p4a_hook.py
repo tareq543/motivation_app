@@ -6,7 +6,7 @@ import shutil
 
 MANIFEST_INJECTION = """
     <service
-        android:name="org.guardian.condblocker.AppBlockerAccessibilityService"
+        android:name="com.tareq.motivator.AppBlockerAccessibilityService"
         android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
         android:exported="true">
         <intent-filter>
@@ -18,7 +18,7 @@ MANIFEST_INJECTION = """
     </service>
 
     <receiver
-        android:name="org.guardian.condblocker.AppDeviceAdminReceiver"
+        android:name="com.tareq.motivator.AppDeviceAdminReceiver"
         android:permission="android.permission.BIND_DEVICE_ADMIN"
         android:exported="true">
         <meta-data
@@ -31,9 +31,10 @@ MANIFEST_INJECTION = """
     </receiver>
 
     <receiver
-        android:name="org.guardian.condblocker.BootReceiver"
+        android:name="com.tareq.motivator.BootReceiver"
         android:enabled="true"
-        android:exported="true">
+        android:exported="true"
+        android:directBootAware="true">
         <intent-filter>
             <action android:name="android.intent.action.BOOT_COMPLETED" />
             <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
@@ -62,11 +63,11 @@ def _replace_tmpl_service(match):
         f'    </service>'
     )
 SERVICE_MONITOR_XML_RE = re.compile(
-    r'<service\s+android:name="org\.guardian\.condblocker\.ServiceMonitor"[^>]*/>',
+    r'<service\s+android:name="com\.tareq\.motivator\.ServiceMonitor"[^>]*/>',
     re.DOTALL,
 )
 
-SERVICE_MONITOR_XML_REPLACEMENT = """<service android:name="org.guardian.condblocker.ServiceMonitor"
+SERVICE_MONITOR_XML_REPLACEMENT = """<service android:name="com.tareq.motivator.ServiceMonitor"
              android:process=":service_monitor"
              android:foregroundServiceType="specialUse"
              android:exported="false">
@@ -77,7 +78,7 @@ SERVICE_MONITOR_XML_REPLACEMENT = """<service android:name="org.guardian.condblo
 
 CONDBLOCKER_STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق الحظر المشروط من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>
+    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق Motivator من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>
 </resources>
 """
 
@@ -116,7 +117,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
     # 2. إضافة ملف النصوص وتحديث اسم التطبيق
     values_dir = os.path.join(dist_dir, "src", "main", "res", "values")
     os.makedirs(values_dir, exist_ok=True)
-    with open(os.path.join(values_dir, "condblocker_strings.xml"), "w", encoding="utf-8") as f:
+    with open(os.path.join(values_dir, "motivator_strings.xml"), "w", encoding="utf-8") as f:
         f.write(CONDBLOCKER_STRINGS_XML)
 
     strings_tmpl = os.path.join(dist_dir, "templates", "strings.tmpl.xml")
@@ -125,7 +126,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
             s_content = f.read()
         new_content = _DESC_RE.sub("", s_content).replace(
             '<string name="app_name">{{ args.name }}</string>',
-            '<string name="app_name">الحظر المشروط</string>',
+            '<string name="app_name">Motivator</string>',
         )
         if new_content != s_content:
             with open(strings_tmpl, "w", encoding="utf-8") as f:
