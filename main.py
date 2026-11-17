@@ -4,6 +4,53 @@ import threading
 import traceback
 from datetime import datetime
 
+
+# ---------------------------------------------------------------------------
+# Kivy 2.3 يعطي كل عنصر BoxShadow يرسم ظلاً عبر FBO و shader خاص. على هذا
+# الجهاز يفشل بناء الـ shader، فينهار Kivy داخل
+# Shader.get_program_log برسالة
+#   SystemError: Negative size passed to PyBytes_FromStringAndSize
+# ثم يحاول كل BoxShadow العمل على FBO = None فيفيض السجل بمئات الأخطاء:
+#   BoxShadow._update_canvas -> 'NoneType' object has no attribute 'pos'
+#   BoxShadow._update_fbo    -> 'NoneType' object has no attribute 'x'
+#   BoxShadow._update_shadow -> 'NoneType' object does not support item ...
+# وKivyMD يضع BoxShadow على كل Card وButton وDialog عبر
+# CommonElevationBehavior، لذلك نستبدل الصنف بتعليمة خاملة لا ترسم شيئاً.
+# لا بد أن ينفذ هذا قبل استيراد kivymd: مترجم KV يحل اسم الصنف من Factory
+# لحظة تحليل قاعدة الـ KV وليس عند إنشاء العنصر.
+# ---------------------------------------------------------------------------
+def _disable_box_shadows():
+    try:
+        from kivy.factory import Factory
+        from kivy.graphics import InstructionGroup
+
+        class FlatShadow(InstructionGroup):
+            """بديل خامل لـ kivy.graphics.boxshadow.BoxShadow."""
+
+            def __init__(self, **kwargs):
+                super().__init__()
+
+            def add(self, *instructions):
+                return None
+
+        # الخصائص التي تحددها قاعدة KivyMD عند كل إعادة رسم.
+        FlatShadow.pos = None
+        FlatShadow.size = None
+        FlatShadow.offset = None
+        FlatShadow.blur_radius = None
+        FlatShadow.spread_radius = None
+        FlatShadow.border_radius = None
+
+        Factory.register("BoxShadow", cls=FlatShadow)
+        print("[GRAPHICS] BoxShadow disabled (flat UI, no FBO/shader)")
+        return True
+    except Exception:
+        traceback.print_exc()
+        return False
+
+
+_DISABLE_BOX_SHADOWS = _disable_box_shadows()
+
 from kivy.clock import Clock
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
@@ -1271,18 +1318,26 @@ class RuleBuilderScreen(MDScreen):
             )
 
     def open_app_picker(self, role: str):
+        """نافذة اختيار التطبيقات — لا تجمّد الواجهة ولا تفشل بصمت.
+
+        سابقاً كانت تجلب قائمة التطبيقات على خيط الواجهة (تجميد عدة ثوانٍ ثم
+        عودة بلا نتيجة إن فشل شيء)، وكانت تبني مئات الصفوف دفعة واحدة.
+        الآن: الجلب في خيط منفصل، والرسم على دفعات 12 صفاً لكل إطار.
+        """
         app = MDApp.get_running_app()
-        if not self._installed_apps:
-            self._installed_apps = app.tracker.get_installed_apps(force_refresh=True)
+        temp_selected = set(
+            self.selected_targets if role == "target" else self.selected_sources
+        )
 
-        current_set = set(self.selected_targets if role == "target" else self.selected_sources)
-        temp_selected = set(current_set)
-
-        content = MDBoxLayout(
-            orientation="vertical",
-            spacing=dp(8),
+        status_lbl = MDLabel(
+            text=ar("جارٍ تحميل قائمة التطبيقات..."),
+            font_name=ARABIC_FONT,
+            font_size="12sp",
+            halign="right",
             size_hint_y=None,
-            height=dp(400),
+            height=dp(26),
+            theme_text_color="Custom",
+            text_color=THEME["muted"],
         )
         search_field = MDTextField(
             hint_text=ar("بحث بالاسم أو الحزمة..."),
@@ -1295,64 +1350,144 @@ class RuleBuilderScreen(MDScreen):
         list_box = MDBoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
         list_box.bind(minimum_height=list_box.setter("height"))
         scroll.add_widget(list_box)
+
+        content = MDBoxLayout(
+            orientation="vertical",
+            spacing=dp(8),
+            size_hint_y=None,
+            height=dp(430),
+        )
         content.add_widget(search_field)
+        content.add_widget(status_lbl)
         content.add_widget(scroll)
 
-        def render_list(query: str = ""):
+        state = {"apps": [], "query": "", "gen": 0, "matched": [], "index": 0}
+
+        def build_row(item):
+            pkg = item["package_name"]
+
+            def _on_active(inst, val, p=pkg):
+                if val:
+                    temp_selected.add(p)
+                else:
+                    temp_selected.discard(p)
+                status_lbl.text = ar(f"المحدد: {len(temp_selected)}")
+
+            row = MDBoxLayout(
+                orientation="horizontal",
+                size_hint_y=None,
+                height=dp(56),
+                spacing=dp(8),
+                padding=[dp(4), 0],
+            )
+            cb = MDCheckbox(
+                active=pkg in temp_selected,
+                size_hint=(None, None),
+                size=(dp(36), dp(36)),
+                pos_hint={"center_y": 0.5},
+            )
+            cb.bind(active=_on_active)
+
+            lbl_col = MDBoxLayout(orientation="vertical")
+            lbl_name = MDLabel(
+                text=ar(item["name"]),
+                font_name=ARABIC_FONT,
+                font_size="14sp",
+                bold=True,
+                halign="right",
+                theme_text_color="Custom",
+                text_color=THEME["text"],
+            )
+            lbl_pkg = MDLabel(
+                text=pkg,
+                font_name=ARABIC_FONT,
+                font_size="11sp",
+                halign="right",
+                theme_text_color="Custom",
+                text_color=THEME["muted"],
+            )
+            lbl_col.add_widget(lbl_name)
+            lbl_col.add_widget(lbl_pkg)
+
+            row.add_widget(cb)
+            row.add_widget(lbl_col)
+
+            icon_path = item.get("icon_path") or ""
+            if icon_path and os.path.exists(icon_path):
+                row.add_widget(
+                    Image(
+                        source=icon_path,
+                        size_hint=(None, None),
+                        size=(dp(34), dp(34)),
+                        pos_hint={"center_y": 0.5},
+                    )
+                )
+            return row
+
+        def render_more(gen, *_args):
+            if gen != state["gen"]:
+                return
+            matched = state["matched"]
+            end = min(state["index"] + 12, len(matched))
+            for item in matched[state["index"]:end]:
+                list_box.add_widget(build_row(item))
+            state["index"] = end
+            status_lbl.text = ar(
+                f"المعروض {end} من {len(matched)} — المحدد: {len(temp_selected)}"
+            )
+            if end < len(matched):
+                Clock.schedule_once(lambda dt: render_more(gen), 0)
+
+        def start_render():
+            state["gen"] += 1
+            gen = state["gen"]
+            state["index"] = 0
+            query = state["query"]
+            state["matched"] = [
+                item
+                for item in state["apps"]
+                if not query
+                or query in item["name"].lower()
+                or query in item["package_name"].lower()
+            ]
             list_box.clear_widgets()
-            q = query.strip().lower()
-            for item in self._installed_apps:
-                if q and q not in item["name"].lower() and q not in item["package_name"].lower():
-                    continue
-                row = MDBoxLayout(size_hint_y=None, height=dp(54), spacing=dp(8), padding=[dp(4), 0])
+            if not state["matched"]:
+                status_lbl.text = ar("لا توجد نتائج مطابقة.")
+                return
+            Clock.schedule_once(lambda dt: render_more(gen), 0)
 
-                cb = MDCheckbox(
-                    active=item["package_name"] in temp_selected,
-                    size_hint=(None, None),
-                    size=(dp(38), dp(38)),
-                )
-                cb.bind(
-                    active=lambda inst, val, p=item["package_name"]: (
-                        temp_selected.add(p) if val else temp_selected.discard(p)
-                    )
+        def apply_apps(apps):
+            state["apps"] = list(apps or [])
+            if state["apps"]:
+                status_lbl.text = ar(f"عدد التطبيقات: {len(state['apps'])}")
+                start_render()
+            else:
+                status_lbl.text = ar(
+                    "تعذر جلب التطبيقات. امنح صلاحية الاستخدام (Usage Access) ثم أعد المحاولة."
                 )
 
-                lbl_col = MDBoxLayout(orientation="vertical")
-                lbl_name = MDLabel(
-                    text=ar(item["name"]),
-                    font_name=ARABIC_FONT,
-                    font_size="14sp",
-                    bold=True,
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["text"],
-                )
-                lbl_pkg = MDLabel(
-                    text=item["package_name"],
-                    font_name=ARABIC_FONT,
-                    font_size="11sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["muted"],
-                )
-                lbl_col.add_widget(lbl_name)
-                lbl_col.add_widget(lbl_pkg)
+        def load_apps():
+            if self._installed_apps:
+                apply_apps(self._installed_apps)
+                return
 
-                row.add_widget(cb)
-                row.add_widget(lbl_col)
-                if item.get("icon_path") and os.path.exists(item["icon_path"]):
-                    row.add_widget(
-                        Image(
-                            source=item["icon_path"],
-                            size_hint=(None, None),
-                            size=(dp(36), dp(36)),
-                            pos_hint={"center_y": 0.5},
-                        )
-                    )
-                list_box.add_widget(row)
+            def worker():
+                try:
+                    apps = app.tracker.get_installed_apps(force_refresh=True)
+                    self._installed_apps = apps
+                except Exception:
+                    traceback.print_exc()
+                    apps = []
+                Clock.schedule_once(lambda dt: apply_apps(apps), 0)
 
-        search_field.bind(text=lambda inst, txt: render_list(txt))
-        render_list("")
+            threading.Thread(target=worker, daemon=True).start()
+
+        def on_search(inst, txt):
+            state["query"] = (txt or "").strip().lower()
+            if state["apps"]:
+                start_render()
+
+        search_field.bind(text=on_search)
 
         def on_confirm(*args):
             if role == "target":
@@ -1360,31 +1495,39 @@ class RuleBuilderScreen(MDScreen):
             else:
                 self.selected_sources = sorted(temp_selected)
             self._refresh_summaries()
-            self.picker_dialog.dismiss()
+            if self.picker_dialog:
+                self.picker_dialog.dismiss()
 
-        self.picker_dialog = MDDialog(
-            title=ar("اختر التطبيقات"),
-            type="custom",
-            md_bg_color=THEME["card"],
-            content_cls=content,
-            buttons=[
-                MDFlatButton(
-                    text=ar("إلغاء"),
-                    font_name=ARABIC_FONT,
-                    theme_text_color="Custom",
-                    text_color=THEME["muted"],
-                    on_release=lambda x: self.picker_dialog.dismiss(),
-                ),
-                MDRaisedButton(
-                    text=ar("تأكيد الاختيار"),
-                    font_name=ARABIC_FONT,
-                    md_bg_color=THEME["accent"],
-                    text_color=THEME["bg_primary"],
-                    on_release=on_confirm,
-                ),
-            ],
-        )
-        self.picker_dialog.open()
+        try:
+            self.picker_dialog = MDDialog(
+                title=ar("اختر التطبيقات"),
+                type="custom",
+                md_bg_color=THEME["card"],
+                content_cls=content,
+                buttons=[
+                    MDFlatButton(
+                        text=ar("إلغاء"),
+                        font_name=ARABIC_FONT,
+                        theme_text_color="Custom",
+                        text_color=THEME["muted"],
+                        on_release=lambda x: self.picker_dialog.dismiss(),
+                    ),
+                    MDRaisedButton(
+                        text=ar("تأكيد الاختيار"),
+                        font_name=ARABIC_FONT,
+                        md_bg_color=THEME["accent"],
+                        text_color=THEME["bg_primary"],
+                        on_release=on_confirm,
+                    ),
+                ],
+            )
+            self.picker_dialog.open()
+        except Exception:
+            traceback.print_exc()
+            notify_snack("تعذر فتح نافذة اختيار التطبيقات.")
+            return
+
+        load_apps()
 
     def save_rule(self):
         app = MDApp.get_running_app()
@@ -1583,6 +1726,7 @@ class CondBlockerApp(MDApp):
     db: CondBlockerDB = None
     tracker: UsageTracker = None
     state_json_path: str = ""
+    _paused = False
 
     def build(self):
         try:
@@ -1671,9 +1815,14 @@ class CondBlockerApp(MDApp):
             pass
 
     def on_pause(self):
+        # أوقف مؤقتات التحديث قبل أن يفقد أندرويد سياق OpenGL، حتى لا تُعاد
+        # رسم العناصر على سياق ميت.
+        self._paused = True
+        self._cancel_screen_timers()
         return True
 
     def on_resume(self):
+        self._paused = False
         try:
             if IS_ANDROID and self.db:
                 self.sync_service_state()
@@ -1686,7 +1835,39 @@ class CondBlockerApp(MDApp):
                 if self.db.is_onboarding_complete():
                     self.start_background_service()
         except Exception:
-            pass
+            traceback.print_exc()
+        self._restart_screen_timers()
+
+    def _cancel_screen_timers(self):
+        try:
+            for screen in getattr(self.root, "screens", []) or []:
+                ev = getattr(screen, "_ev", None)
+                if ev is not None:
+                    ev.cancel()
+                    screen._ev = None
+        except Exception:
+            traceback.print_exc()
+
+    def _restart_screen_timers(self):
+        try:
+            root = self.root
+            if root is None or not getattr(root, "current", None):
+                return
+            screen = root.get_screen(root.current)
+            if getattr(screen, "_ev", None) is not None:
+                return
+            for name, interval in (
+                ("refresh_dashboard", 2.5),
+                ("refresh_settings", 2.5),
+                ("refresh_permissions", 1.5),
+            ):
+                fn = getattr(screen, name, None)
+                if callable(fn):
+                    fn()
+                    screen._ev = Clock.schedule_interval(lambda dt, f=fn: f(), interval)
+                    return
+        except Exception:
+            traceback.print_exc()
 
     def start_background_service(self):
         if not IS_ANDROID:
