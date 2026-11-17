@@ -1,4 +1,4 @@
-package org.guardian.condblocker;
+package com.tareq.motivator;
 
 import android.accessibilityservice.AccessibilityService;
 import android.view.accessibility.AccessibilityEvent;
@@ -67,7 +67,7 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
 
     private boolean containsDangerousKeywords(AccessibilityNodeInfo root, String myPkg) {
         String[] appIdentifiers = new String[]{
-                "CondBlocker", "الحظر المشروط", myPkg
+                "Motivator", "الحظر المشروط", myPkg
         };
         boolean mentionsOurApp = false;
         for (String id : appIdentifiers) {

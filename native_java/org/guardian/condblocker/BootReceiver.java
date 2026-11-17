@@ -1,4 +1,4 @@
-package org.guardian.condblocker;
+package com.tareq.motivator;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -8,7 +8,7 @@ import android.util.Log;
 
 public class BootReceiver extends BroadcastReceiver {
 
-    private static final String TAG = "CondBlocker";
+    private static final String TAG = "Motivator";
 
     @Override
     public void onReceive(Context context, Intent intent) {

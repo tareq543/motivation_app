@@ -1,4 +1,4 @@
-package org.guardian.condblocker;
+package com.tareq.motivator;
 
 import android.app.admin.DeviceAdminReceiver;
 import android.content.Context;
