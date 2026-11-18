@@ -73,6 +73,8 @@ from kivymd.uix.selectioncontrol import MDCheckbox, MDSwitch
 from kivymd.uix.textfield import MDTextField
 
 from database import (
+    COOLDOWN_24H_SECONDS,
+    GRACE_WINDOW_30M_SECONDS,
     CondBlockerDB,
     LOCK_STATE_LOCKED,
     LOCK_STATE_UNLOCKED_WINDOW,
@@ -99,6 +101,23 @@ try:
 except Exception:
     def ar(text: str) -> str:
         return str(text) if text else ""
+
+
+def _dur(seconds: float) -> str:
+    """وصف المدة بالعربية (ثانية / دقيقة / ساعة) حتى تطابق النصوص القيم الفعلية."""
+    total = int(round(float(seconds)))
+    if total < 60:
+        return f"{total} ثانية"
+    minutes = total // 60
+    if minutes < 60:
+        return f"{minutes} دقيقة"
+    hours = minutes // 60
+    rest = minutes % 60
+    return f"{hours} ساعة" if rest == 0 else f"{hours} ساعة و{rest} دقيقة"
+
+
+CD_LABEL = _dur(COOLDOWN_24H_SECONDS)      # "10 ثانية" في وضع التصحيح
+GR_LABEL = _dur(GRACE_WINDOW_30M_SECONDS)  # "30 دقيقة"
 
 
 if IS_ANDROID:
@@ -891,7 +910,7 @@ class PermissionBridge:
                 DevicePolicyManager.EXTRA_DEVICE_ADMIN,
                 cast("android.os.Parcelable", comp),
             )
-            explanation = JString("مطلوب لمنع حذف التطبيق أو تعطيله خارج نافذة الـ 30 دقيقة المسموحة.")
+            explanation = JString(f"مطلوب لمنع حذف التطبيق أو تعطيله خارج نافذة الـ {GR_LABEL} المسموحة.")
             intent.putExtra(
                 DevicePolicyManager.EXTRA_ADD_EXPLANATION,
                 cast("java.lang.CharSequence", explanation),
@@ -1165,15 +1184,15 @@ class DashboardScreen(MDScreen):
             self.ids.lock_badge.text = ar("الحماية الصارمة مفعّلة")
             self.ids.lock_badge.text_color = THEME["warning"]
             self.ids.lock_desc.text = ar(
-                "لا يمكن حذف القواعد أو تعديلها. لفتح نافذة تعديل 30 دقيقة ابدأ عداد 24 ساعة."
+                f"لا يمكن حذف القواعد أو تعديلها. لفتح نافذة تعديل {GR_LABEL} ابدأ عداد {CD_LABEL}."
             )
-            self.ids.btn_lock_action.text = ar("طلب فتح نافذة تعديل (24 ساعة)")
+            self.ids.btn_lock_action.text = ar(f"طلب فتح نافذة تعديل ({CD_LABEL})")
             self.ids.btn_lock_action.md_bg_color = THEME["accent"]
         elif state == LOCK_STATE_WAITING_24H:
             self.ids.lock_badge.text = ar(f"فك القفل بعد {format_hhmmss(rem)}")
             self.ids.lock_badge.text_color = THEME["cyan"]
             self.ids.lock_desc.text = ar(
-                "القيود كلها مفعّلة حتى ينتهي العد، ثم تُفتح نافذة تعديل 30 دقيقة فقط."
+                f"القيود كلها مفعّلة حتى ينتهي العد، ثم تُفتح نافذة تعديل {GR_LABEL} فقط."
             )
             self.ids.btn_lock_action.text = ar("إلغاء الطلب والعودة للقفل الفوري")
             self.ids.btn_lock_action.md_bg_color = THEME["danger"]
@@ -1411,7 +1430,7 @@ class DashboardScreen(MDScreen):
         else:
             actions.add_widget(
                 MDLabel(
-                    text=ar("التعديل يتطلب نافذة 30 دقيقة"),
+                    text=ar(f"التعديل يتطلب نافذة {GR_LABEL}"),
                     font_name=ARABIC_FONT,
                     font_size="11sp",
                     halign="right",
@@ -1442,7 +1461,7 @@ class DashboardScreen(MDScreen):
         state = app.db.get_lock_state()["state"]
         if state == LOCK_STATE_LOCKED:
             app.db.request_unlock_24h(now_elapsed, now_wall)
-            notify_snack("بدأ العداد التنازلي الإلزامي لمدة 24 ساعة.")
+            notify_snack(f"بدأ العداد التنازلي لفتح نافذة التعديل: {CD_LABEL}.")
         else:
             app.db.cancel_unlock_request()
             notify_snack("تم تفعيل القفل الصارم فوراً.")
@@ -1470,7 +1489,7 @@ class DashboardScreen(MDScreen):
     def open_edit_rule(self, rule_id: int):
         app = MDApp.get_running_app()
         if not app.db.can_modify_restrictions():
-            notify_snack("التعديل متاح فقط خلال نافذة الـ 30 دقيقة.")
+            notify_snack(f"التعديل متاح فقط خلال نافذة الـ {GR_LABEL}.")
             return
         rb = app.root.get_screen("rule_builder")
         rb.load_rule(rule_id)
@@ -1802,7 +1821,7 @@ class RuleBuilderScreen(MDScreen):
     def save_rule(self):
         app = MDApp.get_running_app()
         if self.editing_rule_id is not None and not app.db.can_modify_restrictions():
-            notify_snack("تعديل قاعدة موجودة محظور خارج نافذة الـ 30 دقيقة.")
+            notify_snack(f"تعديل قاعدة موجودة محظور خارج نافذة الـ {GR_LABEL}.")
             return
 
         name = self.ids.input_rule_name.text.strip()
@@ -1849,7 +1868,7 @@ class RuleBuilderScreen(MDScreen):
     def delete_current_rule(self):
         app = MDApp.get_running_app()
         if not app.db.can_modify_restrictions():
-            notify_snack("الحذف محظور خارج نافذة الـ 30 دقيقة.")
+            notify_snack(f"الحذف محظور خارج نافذة الـ {GR_LABEL}.")
             return
         if self.editing_rule_id is not None:
             app.db.delete_rule(self.editing_rule_id)
@@ -1865,7 +1884,7 @@ class SettingsScreen(MDScreen):
         self.ids.settings_title.text = ar("الإعدادات والتصفير اليومي")
         self.ids.lbl_reset_title.text = ar("وقت التصفير اليومي المخصص (Daily Reset)")
         self.ids.btn_pick_reset_time.text = ar("تغيير وقت التصفير اليومي")
-        self.ids.lbl_strict_title.text = ar("إدارة الحماية الصارمة (24 ساعة -> 30 دقيقة)")
+        self.ids.lbl_strict_title.text = ar(f"إدارة الحماية الصارمة ({CD_LABEL} -> {GR_LABEL})")
         self.ids.lbl_perms_link.text = ar("فحص صلاحيات النظام")
         self.ids.btn_recheck_perms.text = ar("مراجعة شاشة الصلاحيات")
         self.ids.lbl_tamper_title.text = ar("سجل محاولات التلاعب بالوقت")
@@ -1893,9 +1912,9 @@ class SettingsScreen(MDScreen):
 
             if state == LOCK_STATE_LOCKED:
                 self.ids.lbl_strict_status.text = ar(
-                    "النظام مقفل حالياً. لفتح نافذة الـ 30 دقيقة المسموح فيها بالتعديل أو إلغاء مشرف الجهاز وحذف التطبيق، ابدأ عداد الـ 24 ساعة."
+                    f"النظام مقفل حالياً. لفتح نافذة الـ {GR_LABEL} المسموح فيها بالتعديل أو إلغاء مشرف الجهاز وحذف التطبيق، ابدأ عداد الـ {CD_LABEL}."
                 )
-                self.ids.btn_strict_unlock.text = ar("بدء عداد الـ 24 ساعة لفك القفل")
+                self.ids.btn_strict_unlock.text = ar(f"بدء عداد {CD_LABEL} لفك القفل")
             elif state == LOCK_STATE_WAITING_24H:
                 self.ids.lbl_strict_status.text = ar(f"جاري العد التنازلي: متبقي {format_hhmmss(rem)}")
                 self.ids.btn_strict_unlock.text = ar("إلغاء طلب فك القفل")
@@ -1918,7 +1937,7 @@ class SettingsScreen(MDScreen):
     def open_time_picker(self):
         app = MDApp.get_running_app()
         if not app.db.can_modify_restrictions():
-            notify_snack("تغيير وقت التصفير متاح فقط في نافذة الـ 30 دقيقة.")
+            notify_snack(f"تغيير وقت التصفير متاح فقط في نافذة الـ {GR_LABEL}.")
             return
         h, m = app.db.get_reset_time()
         box = MDBoxLayout(
@@ -1988,7 +2007,7 @@ class SettingsScreen(MDScreen):
         state = app.db.get_lock_state()["state"]
         if state == LOCK_STATE_LOCKED:
             app.db.request_unlock_24h(now_elapsed, now_wall)
-            notify_snack("بدأ عداد الانتظار الإلزامي لمدة 24 ساعة.")
+            notify_snack(f"بدأ عداد الانتظار الإلزامي: {CD_LABEL}.")
         else:
             app.db.cancel_unlock_request()
             notify_snack("تم إعادة تفعيل القفل الصارم.")

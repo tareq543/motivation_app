@@ -6,7 +6,7 @@ package.domain = com.tareq
 
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,xml,java,json,ttf
-version = 1.0.0
+version = 2.0
 
 requirements = python3,sqlite3,kivy==2.3.0,kivymd==1.2.0,arabic-reshaper,python-bidi==0.4.2,pillow,pyjnius
 orientation = portrait
