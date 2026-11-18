@@ -4,19 +4,23 @@ import android.accessibilityservice.AccessibilityService;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 public class AppBlockerAccessibilityService extends AccessibilityService {
 
     private String lastLockState = "LOCKED";
     private boolean onboardingComplete = false;
     private long lastStateReadMs = 0;
+    private final Set<String> blockedPackages = new HashSet<>();
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
@@ -36,6 +40,13 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
 
         // لا تفرض الحماية الصارمة قبل إكمال الإعداد الأولي أو أثناء نافذة الـ 30 دقيقة
         if (!onboardingComplete || "UNLOCKED_WINDOW".equals(lastLockState)) {
+            return;
+        }
+
+        // منع فعلي لا يعتمد على نافذة الـ Overlay: أي تطبيق محظور لم يكتمل شرطه
+        // يُخرج المستخدم منه فوراً إلى الشاشة الرئيسية.
+        if (!myPkg.equals(pkg) && blockedPackages.contains(pkg)) {
+            performGlobalAction(GLOBAL_ACTION_HOME);
             return;
         }
 
@@ -123,6 +134,16 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
                     JSONObject obj = new JSONObject(new String(buf, 0, read, StandardCharsets.UTF_8));
                     lastLockState = obj.optString("lock_state", "LOCKED");
                     onboardingComplete = obj.optBoolean("onboarding_complete", false);
+                    blockedPackages.clear();
+                    JSONArray arr = obj.optJSONArray("blocked_packages");
+                    if (arr != null) {
+                        for (int i = 0; i < arr.length(); i++) {
+                            String bp = arr.optString(i, "");
+                            if (!bp.isEmpty()) {
+                                blockedPackages.add(bp);
+                            }
+                        }
+                    }
                 }
             }
         } catch (Exception ignored) {
