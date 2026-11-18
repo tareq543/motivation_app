@@ -180,16 +180,19 @@ print(f"[FONT] using: {ARABIC_FONT} from {_arabic_font_path}")
 
 
 THEME_HEX = {
-    "bg_primary": "#0B1120",
-    "bg_secondary": "#111827",
-    "card": "#1E293B",
-    "accent": "#F97316",
-    "cyan": "#06B6D4",
-    "warning": "#F97316",
-    "text": "#F8FAFC",
-    "muted": "#94A3B8",
-    "success": "#10B981",
-    "danger": "#EF4444",
+    "bg_primary": "#080C16",
+    "bg_secondary": "#0E1626",
+    "card": "#141D31",
+    "card_hover": "#1B2740",
+    "border": "#233149",
+    "accent": "#FF7A18",
+    "accent_soft": "#FFB067",
+    "cyan": "#22D3EE",
+    "warning": "#F59E0B",
+    "text": "#F2F6FC",
+    "muted": "#93A4BF",
+    "success": "#22C55E",
+    "danger": "#F43F5E",
 }
 
 THEME = {k: get_color_from_hex(v) for k, v in THEME_HEX.items()}
@@ -200,11 +203,21 @@ KV = f"""
 
 <DarkCard@MDCard>:
     md_bg_color: get_color_from_hex("{THEME_HEX['card']}")
-    radius: [dp(16), dp(16), dp(16), dp(16)]
-    padding: dp(14)
-    spacing: dp(10)
+    line_color: get_color_from_hex("{THEME_HEX['border']}")
+    line_width: dp(1)
+    radius: [dp(22), dp(22), dp(22), dp(22)]
+    padding: dp(18)
+    spacing: dp(12)
     size_hint_y: None
     height: self.minimum_height
+
+<PillLabel@MDLabel>:
+    font_name: "{ARABIC_FONT}"
+    markup: False
+    halign: "right"
+    valign: "middle"
+    size_hint_y: None
+    height: dp(24)
 
 <OnboardingScreen>:
     md_bg_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
@@ -262,10 +275,10 @@ KV = f"""
 
         MDBoxLayout:
             size_hint_y: None
-            height: dp(60)
+            height: dp(68)
             md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-            padding: [dp(16), dp(8)]
-            spacing: dp(10)
+            padding: [dp(18), dp(12)]
+            spacing: dp(12)
 
             MDIconButton:
                 icon: "cog"
@@ -315,7 +328,8 @@ KV = f"""
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
                         size_hint_y: None
-                        height: self.texture_size[1] + dp(8)
+                        height: self.texture_size[1] + dp(10)
+                        text_size: self.width, None
                     MDRaisedButton:
                         id: btn_lock_action
                         text: ""
@@ -359,9 +373,9 @@ KV = f"""
 
         MDBoxLayout:
             size_hint_y: None
-            height: dp(58)
+            height: dp(68)
             md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-            padding: [dp(12), dp(8)]
+            padding: [dp(18), dp(12)]
             MDIconButton:
                 icon: "arrow-left"
                 theme_icon_color: "Custom"
@@ -422,7 +436,8 @@ KV = f"""
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
                         size_hint_y: None
-                        height: self.texture_size[1] + dp(8)
+                        height: self.texture_size[1] + dp(10)
+                        text_size: self.width, None
                     MDRaisedButton:
                         id: btn_pick_targets
                         text: ""
@@ -453,7 +468,8 @@ KV = f"""
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
                         size_hint_y: None
-                        height: self.texture_size[1] + dp(8)
+                        height: self.texture_size[1] + dp(10)
+                        text_size: self.width, None
                     MDRaisedButton:
                         id: btn_pick_sources
                         text: ""
@@ -507,7 +523,8 @@ KV = f"""
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
                         size_hint_y: None
-                        height: self.texture_size[1] + dp(8)
+                        height: self.texture_size[1] + dp(10)
+                        text_size: self.width, None
 
                 MDRaisedButton:
                     id: btn_save_rule
@@ -538,9 +555,9 @@ KV = f"""
 
         MDBoxLayout:
             size_hint_y: None
-            height: dp(58)
+            height: dp(68)
             md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-            padding: [dp(12), dp(8)]
+            padding: [dp(18), dp(12)]
             MDIconButton:
                 icon: "arrow-left"
                 theme_icon_color: "Custom"
@@ -668,7 +685,8 @@ KV = f"""
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
                         size_hint_y: None
-                        height: self.texture_size[1] + dp(8)
+                        height: self.texture_size[1] + dp(10)
+                        text_size: self.width, None
 """
 
 
@@ -1014,126 +1032,259 @@ class OnboardingScreen(MDScreen):
 
 
 class DashboardScreen(MDScreen):
+    _busy = False
+    _label_cache: dict[str, str] = {}
+
     def on_pre_enter(self, *args):
-        self.ids.dash_header.text = ar("لوحة التحكم - الحظر المشروط")
+        self.ids.dash_header.text = ar("لوحة التحكم")
         self.ids.btn_add_rule.text = ar("+ قاعدة جديدة")
         self.ids.rules_section_lbl.text = ar("القواعد النشطة")
-        self.refresh_dashboard()
-        self._ev = Clock.schedule_interval(lambda dt: self.refresh_dashboard(), 2.5)
+        self.refresh_dashboard(force=True)
+        if getattr(self, "_ev", None):
+            try:
+                self._ev.cancel()
+            except Exception:
+                pass
+        self._ev = Clock.schedule_interval(lambda dt: self.refresh_dashboard(), 2.0)
 
     def on_pre_leave(self, *args):
-        if hasattr(self, "_ev") and self._ev:
+        if getattr(self, "_ev", None):
             self._ev.cancel()
+            self._ev = None
 
-    def refresh_dashboard(self):
+    @staticmethod
+    def _new_card():
+        """بطاقة بنفس شكل DarkCard في ملف KV لكن متاحة من بايثون."""
+        return MDCard(
+            md_bg_color=THEME["card"],
+            line_color=THEME.get("border", THEME["card"]),
+            line_width=dp(1),
+            radius=[dp(22), dp(22), dp(22), dp(22)],
+            padding=dp(18),
+            spacing=dp(12),
+            orientation="vertical",
+            size_hint_y=None,
+            height=dp(10),
+        )
+
+    def _grow(self, card):
+        """اجعل البطاقة تأخذ ارتفاع محتواها بدل ارتفاع ثابت يسبب تراكب النصوص."""
+        card.height = card.minimum_height
+        card.bind(minimum_height=card.setter("height"))
+        return card
+
+    def _label(self, pkg: str) -> str:
+        if not pkg:
+            return ""
+        if pkg not in self._label_cache:
+            try:
+                self._label_cache[pkg] = MDApp.get_running_app().tracker.get_app_label(pkg)
+            except Exception:
+                self._label_cache[pkg] = pkg
+        return self._label_cache[pkg]
+
+    # ------------------------------------------------------------------ data
+    def refresh_dashboard(self, force: bool = False):
+        """تحديث اللوحة دون تجميد الواجهة.
+
+        سابقاً كان استعلام UsageStats (ساعات من الأحداث) وPackageManager لكل
+        تطبيق مختار يجري على خيط الواجهة، فتتجمد الشاشة كلما زاد عدد
+        التطبيقات المختارة. الآن الحساب في خيط منفصل والعرض بعد وصوله.
+        """
+        if self._busy and not force:
+            return
+        self._busy = True
+        app = MDApp.get_running_app()
+
+        lock_info = {}
         try:
-            app = MDApp.get_running_app()
             now_elapsed, now_wall = get_android_clocks()
             lock_info = app.db.sync_monotonic_clock(now_elapsed, now_wall)
-            state = lock_info["state"]
-            rem = lock_info["remaining_seconds"]
+        except Exception:
+            traceback.print_exc()
 
-            if state == LOCK_STATE_LOCKED:
-                self.ids.lock_badge.text = ar("حالة الحماية: مقفل بصرامة (LOCKED)")
-                self.ids.lock_badge.text_color = THEME["warning"]
-                self.ids.lock_desc.text = ar(
-                    "التعديل والحذف وإلغاء التثبيت محظورة تماماً. لفتح نافذة تعديل (30 دقيقة) يجب بدء مؤقت الانتظار الإلزامي 24 ساعة."
-                )
-                self.ids.btn_lock_action.text = ar("طلب إلغاء القفل (بدء عداد 24 ساعة)")
-                self.ids.btn_lock_action.md_bg_color = THEME["warning"]
-            elif state == LOCK_STATE_WAITING_24H:
-                self.ids.lock_badge.text = ar(f"عد تنازلي لفك القفل: {format_hhmmss(rem)}")
-                self.ids.lock_badge.text_color = THEME["cyan"]
-                self.ids.lock_desc.text = ar(
-                    "تظل جميع القيود مفعّلة حتى انتهاء الـ 24 ساعة، بعدها تفتح نافذة تعديل لمدة 30 دقيقة فقط."
-                )
-                self.ids.btn_lock_action.text = ar("إلغاء طلب فك القفل والعودة للقفل الفوري")
-                self.ids.btn_lock_action.md_bg_color = THEME["danger"]
-            else:
-                self.ids.lock_badge.text = ar(f"نافذة التعديل مفتوحة: {format_hhmmss(rem)}")
-                self.ids.lock_badge.text_color = THEME["success"]
-                self.ids.lock_desc.text = ar(
-                    "يمكنك الآن تعديل أو حذف القواعد وتغيير وقت التصفير أو إلغاء التثبيت قبل انتهاء المهلة."
-                )
-                self.ids.btn_lock_action.text = ar("إعادة القفل الصارم الآن")
-                self.ids.btn_lock_action.md_bg_color = THEME["cyan"]
-
-            can_mod = app.db.can_modify_restrictions()
-            self.ids.btn_add_rule.disabled = not can_mod
-
+        def worker():
             try:
-                evaluations, blocked_targets, _ = app.tracker.evaluate_all_rules(app.db)
-                app.db.export_blocker_state(app.state_json_path, list(blocked_targets.keys()))
+                evaluations, blocked_targets, usage = app.tracker.evaluate_all_rules(app.db)
+                err = ""
             except Exception:
-                evaluations, blocked_targets = [], {}
+                evaluations, blocked_targets, usage = [], {}, {}
+                err = traceback.format_exc()
+                print(f"[DASHBOARD] evaluate failed:\n{err}")
+            Clock.schedule_once(
+                lambda dt: self._apply(
+                    evaluations, blocked_targets, usage, err, lock_info, force
+                ),
+                0,
+            )
 
-            container = self.ids.rules_container
-            container.clear_widgets()
+        threading.Thread(target=worker, daemon=True).start()
 
-            if not evaluations:
-                empty_card = MDCard(
-                    md_bg_color=THEME["card"],
-                    radius=[dp(16), dp(16), dp(16), dp(16)],
-                    padding=dp(18),
-                    size_hint_y=None,
-                    height=dp(96),
+    def _apply(self, evaluations, blocked_targets, usage, err, lock_info, force_render=False):
+        self._busy = False
+        try:
+            app = MDApp.get_running_app()
+            if lock_info:
+                self._render_lock(lock_info)
+            self.ids.btn_add_rule.disabled = False
+
+            # لا تُعد بناء البطاقات كل ثانيتين إن لم تتغير البيانات:
+            # إعادة بناء عشرات البطاقات دورياً كانت تسبب تقطعاً في التمرير.
+            state_key = lock_info.get("state") if lock_info else ""
+            signature = (
+                state_key,
+                bool(err),
+                tuple(
+                    (
+                        ev["rule"]["id"],
+                        ev["rule"]["enabled"],
+                        ev["is_unlocked"],
+                        int(ev["overall_progress"] * 100),
+                        round(float(ev["completed_minutes"]), 1),
+                    )
+                    for ev in evaluations
+                ),
+            )
+            if signature != getattr(self, "_rules_signature", None) or force_render:
+                self._rules_signature = signature
+                self._render_rules(evaluations, err, usage)
+            try:
+                app.db.export_blocker_state(
+                    app.state_json_path, list(blocked_targets.keys())
                 )
-                empty_card.add_widget(
+            except Exception:
+                traceback.print_exc()
+        except Exception:
+            traceback.print_exc()
+
+    def _render_lock(self, lock_info):
+        state = lock_info["state"]
+        rem = lock_info["remaining_seconds"]
+
+        if state == LOCK_STATE_LOCKED:
+            self.ids.lock_badge.text = ar("الحماية الصارمة مفعّلة")
+            self.ids.lock_badge.text_color = THEME["warning"]
+            self.ids.lock_desc.text = ar(
+                "لا يمكن حذف القواعد أو تعديلها. لفتح نافذة تعديل 30 دقيقة ابدأ عداد 24 ساعة."
+            )
+            self.ids.btn_lock_action.text = ar("طلب فتح نافذة تعديل (24 ساعة)")
+            self.ids.btn_lock_action.md_bg_color = THEME["accent"]
+        elif state == LOCK_STATE_WAITING_24H:
+            self.ids.lock_badge.text = ar(f"فك القفل بعد {format_hhmmss(rem)}")
+            self.ids.lock_badge.text_color = THEME["cyan"]
+            self.ids.lock_desc.text = ar(
+                "القيود كلها مفعّلة حتى ينتهي العد، ثم تُفتح نافذة تعديل 30 دقيقة فقط."
+            )
+            self.ids.btn_lock_action.text = ar("إلغاء الطلب والعودة للقفل الفوري")
+            self.ids.btn_lock_action.md_bg_color = THEME["danger"]
+        else:
+            self.ids.lock_badge.text = ar(f"نافذة التعديل مفتوحة {format_hhmmss(rem)}")
+            self.ids.lock_badge.text_color = THEME["success"]
+            self.ids.lock_desc.text = ar(
+                "يمكنك الآن تعديل القواعد أو حذفها قبل انتهاء المهلة."
+            )
+            self.ids.btn_lock_action.text = ar("إعادة القفل الصارم الآن")
+            self.ids.btn_lock_action.md_bg_color = THEME["cyan"]
+
+    def _render_rules(self, evaluations, err, usage):
+        container = self.ids.rules_container
+        container.clear_widgets()
+
+        try:
+            if not PermissionBridge.all_granted():
+                warn = self._new_card()
+                warn.add_widget(
                     MDLabel(
-                        text=ar("لا توجد قواعد بعد. اضغط على (+ قاعدة جديدة) لإنشاء أول قاعدة حظر مشروط."),
+                        text=ar("الحماية غير مكتملة: صلاحية ناقصة"),
                         font_name=ARABIC_FONT,
-                        halign="center",
+                        bold=True,
+                        font_size="14sp",
+                        halign="right",
                         theme_text_color="Custom",
-                        text_color=THEME["muted"],
+                        text_color=THEME["warning"],
+                        size_hint_y=None,
+                        height=dp(26),
                     )
                 )
-                container.add_widget(empty_card)
-                return
-
-            for ev in evaluations:
-                rule = ev["rule"]
-                is_unlocked = ev["is_unlocked"]
-                prog = ev["overall_progress"]
-                mode_ar = "تجميعي (SUM)" if rule["mode"] == "SUM" else "فردي إلزامي (INDIVIDUAL)"
-
-                card = MDCard(
-                    md_bg_color=THEME["card"],
-                    radius=[dp(16), dp(16), dp(16), dp(16)],
-                    padding=dp(14),
-                    spacing=dp(8),
-                    orientation="vertical",
-                    size_hint_y=None,
-                    height=dp(194),
+                warn.add_widget(
+                    MDLabel(
+                        text=ar(
+                            "بدون صلاحية الاستخدام + الظهور فوق التطبيقات + خدمة الوصول "
+                            "لن يعمل المنع فعلياً. اضغط الزر لإكمالها."
+                        ),
+                        font_name=ARABIC_FONT,
+                        font_size="12sp",
+                        halign="right",
+                        theme_text_color="Custom",
+                        text_color=THEME["muted"],
+                        size_hint_y=None,
+                        height=dp(58),
+                    )
                 )
+                warn.add_widget(
+                    MDRaisedButton(
+                        text=ar("إكمال الصلاحيات"),
+                        font_name=ARABIC_FONT,
+                        md_bg_color=THEME["warning"],
+                        text_color=THEME["bg_primary"],
+                        size_hint_x=1,
+                        on_release=lambda x: MDApp.get_running_app().go_screen("onboarding"),
+                    )
+                )
+                container.add_widget(self._grow(warn))
+        except Exception:
+            traceback.print_exc()
 
-                top_row = MDBoxLayout(size_hint_y=None, height=dp(30))
-                status_lbl = MDLabel(
-                    text=ar("مفتوح" if is_unlocked else "محظور"),
+        if err:
+            card = self._new_card()
+            card.add_widget(
+                MDLabel(
+                    text=ar("تعذر حساب القواعد. تفاصيل الخطأ:"),
                     font_name=ARABIC_FONT,
                     bold=True,
                     font_size="13sp",
+                    halign="right",
                     theme_text_color="Custom",
-                    text_color=THEME["success"] if is_unlocked else THEME["warning"],
-                    size_hint_x=0.32,
+                    text_color=THEME["danger"],
+                    size_hint_y=None,
+                    height=dp(24),
                 )
-                name_lbl = MDLabel(
-                    text=ar(rule["name"]),
+            )
+            card.add_widget(
+                MDLabel(
+                    text=err[-600:],
+                    font_name=ARABIC_FONT,
+                    font_size="10sp",
+                    halign="left",
+                    theme_text_color="Custom",
+                    text_color=THEME["muted"],
+                    size_hint_y=None,
+                    height=dp(180),
+                )
+            )
+            container.add_widget(self._grow(card))
+            return
+
+        if not evaluations:
+            card = self._new_card()
+            card.add_widget(
+                MDLabel(
+                    text=ar("لا توجد قواعد بعد"),
                     font_name=ARABIC_FONT,
                     bold=True,
                     font_size="16sp",
                     halign="right",
                     theme_text_color="Custom",
                     text_color=THEME["text"],
-                    size_hint_x=0.68,
+                    size_hint_y=None,
+                    height=dp(30),
                 )
-                top_row.add_widget(status_lbl)
-                top_row.add_widget(name_lbl)
-
-                tgt_names = ", ".join(app.tracker.get_app_label(p) for p in rule["target_packages"][:3])
-                src_names = ", ".join(app.tracker.get_app_label(p) for p in rule["source_packages"][:3])
-                meta_lbl = MDLabel(
+            )
+            card.add_widget(
+                MDLabel(
                     text=ar(
-                        f"المحظور: {tgt_names}\nالمصدر: {src_names} | النمط: {mode_ar}"
+                        "اضغط (+ قاعدة جديدة): اختر التطبيقات التي تريد حظرها، "
+                        "والتطبيقات التي يجب استخدامها أولاً، ثم عدد الدقائق المطلوبة."
                     ),
                     font_name=ARABIC_FONT,
                     font_size="12sp",
@@ -1141,55 +1292,149 @@ class DashboardScreen(MDScreen):
                     theme_text_color="Custom",
                     text_color=THEME["muted"],
                     size_hint_y=None,
-                    height=dp(40),
+                    height=dp(70),
                 )
+            )
+            container.add_widget(self._grow(card))
+            return
 
-                prog_lbl = MDLabel(
-                    text=ar(
-                        f"المنجز: {ev['completed_minutes']:.1f} د | المتبقي: {ev['remaining_minutes']:.1f} د (الهدف: {ev['required_minutes']} د)"
-                    ),
+        for ev in evaluations:
+            container.add_widget(self._rule_card(ev, usage))
+
+    def _rule_card(self, ev, usage):
+        rule = ev["rule"]
+        is_unlocked = ev["is_unlocked"]
+        prog = float(ev["overall_progress"])
+        mode_ar = "تجميعي SUM" if rule["mode"] == "SUM" else "فردي INDIVIDUAL"
+        can_mod = MDApp.get_running_app().db.can_modify_restrictions()
+
+        card = self._new_card()
+        card.orientation = "vertical"
+
+        top = MDBoxLayout(size_hint_y=None, height=dp(32), spacing=dp(10))
+        chip = MDCard(
+            md_bg_color=THEME["success"] if is_unlocked else THEME["danger"],
+            radius=[dp(14), dp(14), dp(14), dp(14)],
+            padding=0,
+            size_hint=(None, None),
+            size=(dp(74), dp(26)),
+            pos_hint={"center_y": 0.5},
+        )
+        chip.add_widget(
+            MDLabel(
+                text=ar("مفتوح" if is_unlocked else "محظور"),
+                font_name=ARABIC_FONT,
+                bold=True,
+                font_size="11sp",
+                halign="center",
+                theme_text_color="Custom",
+                text_color=get_color_from_hex("#07101E"),
+            )
+        )
+        top.add_widget(chip)
+        top.add_widget(
+            MDLabel(
+                text=ar(rule["name"]),
+                font_name=ARABIC_FONT,
+                bold=True,
+                font_size="17sp",
+                halign="right",
+                theme_text_color="Custom",
+                text_color=THEME["text"],
+                size_hint_y=None,
+                height=dp(30),
+                text_size=(self.width, None),
+            )
+        )
+
+        tgt = ", ".join(self._label(p) for p in rule["target_packages"][:3])
+        extra = len(rule["target_packages"]) - 3
+        more = f" +{extra}" if extra > 0 else ""
+        src = ", ".join(self._label(p) for p in rule["source_packages"][:3])
+        meta = MDLabel(
+            text=ar(f"المحظور: {tgt}{more}\nالأولوية: {src} · {mode_ar}"),
+            font_name=ARABIC_FONT,
+            font_size="12sp",
+            halign="right",
+            theme_text_color="Custom",
+            text_color=THEME["muted"],
+            size_hint_y=None,
+            height=dp(46),
+        )
+
+        done = float(ev["completed_minutes"])
+        need = float(ev["required_minutes"])
+        stat = MDBoxLayout(size_hint_y=None, height=dp(28), spacing=dp(6))
+        stat.add_widget(
+            MDLabel(
+                text=ar(f"{done:.1f}"),
+                font_name=ARABIC_FONT,
+                bold=True,
+                font_size="19sp",
+                halign="left",
+                theme_text_color="Custom",
+                text_color=THEME["accent_soft"],
+                size_hint_x=0.28,
+            )
+        )
+        stat.add_widget(
+            MDLabel(
+                text=ar(f"من {need:.0f} دقيقة مطلوبة اليوم"),
+                font_name=ARABIC_FONT,
+                font_size="12sp",
+                halign="right",
+                theme_text_color="Custom",
+                text_color=THEME["muted"],
+                size_hint_x=0.72,
+            )
+        )
+
+        pbar = MDProgressBar(
+            value=int(prog * 100),
+            color=THEME["success"] if is_unlocked else THEME["accent"],
+            size_hint_y=None,
+            height=dp(10),
+        )
+
+        actions = MDBoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10))
+        if can_mod:
+            actions.add_widget(
+                MDRaisedButton(
+                    text=ar("تعديل القاعدة"),
                     font_name=ARABIC_FONT,
                     font_size="12sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["cyan"],
-                    size_hint_y=None,
-                    height=dp(22),
-                )
-
-                pbar = MDProgressBar(
-                    value=int(prog * 100),
-                    color=THEME["success"] if is_unlocked else THEME["accent"],
-                    size_hint_y=None,
-                    height=dp(8),
-                )
-
-                actions_row = MDBoxLayout(size_hint_y=None, height=dp(40), spacing=dp(10))
-                edit_btn = MDRaisedButton(
-                    text=ar("تعديل القاعدة" if can_mod else "مقفل"),
-                    font_name=ARABIC_FONT,
-                    md_bg_color=THEME["bg_secondary"],
-                    text_color=THEME["accent"] if can_mod else THEME["muted"],
-                    disabled=not can_mod,
+                    md_bg_color=THEME["card_hover"],
+                    text_color=THEME["accent_soft"],
                     on_release=lambda x, rid=rule["id"]: self.open_edit_rule(rid),
                 )
-                sw = MDSwitch(
-                    active=rule["enabled"],
-                    disabled=not can_mod,
+            )
+        else:
+            actions.add_widget(
+                MDLabel(
+                    text=ar("التعديل يتطلب نافذة 30 دقيقة"),
+                    font_name=ARABIC_FONT,
+                    font_size="11sp",
+                    halign="right",
+                    valign="middle",
+                    theme_text_color="Custom",
+                    text_color=THEME["muted"],
                 )
-                sw.bind(active=lambda inst, val, rid=rule["id"]: self.on_toggle_rule(rid, val))
+            )
+        # KivyMD 1.2.0: تمرير active إلى MDSwitch في المُنشئ يرفع
+        # AttributeError لأن on_active ينفذ قبل إنشاء ids.thumb، فيتوقف
+        # بناء كل بطاقات القواعد وتظهر اللوحة فارغة. لذلك نضبطها بعد الإنشاء.
+        sw = MDSwitch()
+        sw.disabled = not can_mod
+        sw.active = bool(rule["enabled"])
+        sw.bind(active=lambda inst, val, rid=rule["id"]: self.on_toggle_rule(rid, val))
+        actions.add_widget(sw)
 
-                actions_row.add_widget(edit_btn)
-                actions_row.add_widget(sw)
-
-                card.add_widget(top_row)
-                card.add_widget(meta_lbl)
-                card.add_widget(prog_lbl)
-                card.add_widget(pbar)
-                card.add_widget(actions_row)
-                container.add_widget(card)
-        except Exception:
-            traceback.print_exc()
+        card.add_widget(top)
+        card.add_widget(meta)
+        card.add_widget(stat)
+        card.add_widget(pbar)
+        card.add_widget(actions)
+        return self._grow(card)
 
     def on_lock_action(self):
         app = MDApp.get_running_app()
@@ -1207,17 +1452,17 @@ class DashboardScreen(MDScreen):
     def on_toggle_rule(self, rule_id: int, val: bool):
         app = MDApp.get_running_app()
         if not app.db.can_modify_restrictions():
-            notify_snack("لا يمكن تعديل القواعد أثناء حالة القفل الصارم.")
+            notify_snack("لا يمكن تعطيل القواعد أثناء القفل الصارم.")
             self.refresh_dashboard()
             return
         app.db.toggle_rule(rule_id, val)
         app.sync_service_state()
+        self.refresh_dashboard()
 
     def open_new_rule(self):
+        # إضافة قاعدة جديدة مسموحة دائماً: التشديد لا يخالف الحماية الصارمة،
+        # بينما التعديل والحذف يبقيان محظورين خارج نافذة الـ 30 دقيقة.
         app = MDApp.get_running_app()
-        if not app.db.can_modify_restrictions():
-            notify_snack("التعديل متاح فقط خلال نافذة الـ 30 دقيقة.")
-            return
         rb = app.root.get_screen("rule_builder")
         rb.load_rule(None)
         app.go_screen("rule_builder")
@@ -1238,6 +1483,24 @@ class RuleBuilderScreen(MDScreen):
     selected_sources: list[str] = []
     picker_dialog = None
     _installed_apps: list[dict] = []
+    _label_cache: dict[str, str] = {}
+
+    def on_pre_leave(self, *args):
+        # لا تترك نافذة الاختيار مفتوحة إذا غادر المستخدم الشاشة
+        try:
+            if self.picker_dialog is not None:
+                self.picker_dialog.dismiss()
+                self.picker_dialog = None
+        except Exception:
+            pass
+
+    def _label(self, pkg: str) -> str:
+        if pkg not in self._label_cache:
+            try:
+                self._label_cache[pkg] = MDApp.get_running_app().tracker.get_app_label(pkg)
+            except Exception:
+                self._label_cache[pkg] = pkg
+        return self._label_cache[pkg]
 
     def on_pre_enter(self, *args):
         self.ids.lbl_rule_name.text = ar("اسم القاعدة")
@@ -1291,13 +1554,13 @@ class RuleBuilderScreen(MDScreen):
     def _refresh_summaries(self):
         app = MDApp.get_running_app()
         if self.selected_targets:
-            t_txt = ", ".join(app.tracker.get_app_label(p) for p in self.selected_targets)
+            t_txt = ", ".join(self._label(p) for p in self.selected_targets)
             self.ids.lbl_target_summary.text = ar(f"المختار ({len(self.selected_targets)}): {t_txt}")
         else:
             self.ids.lbl_target_summary.text = ar("لم يتم اختيار أي تطبيق محظور بعد.")
 
         if self.selected_sources:
-            s_txt = ", ".join(app.tracker.get_app_label(p) for p in self.selected_sources)
+            s_txt = ", ".join(self._label(p) for p in self.selected_sources)
             self.ids.lbl_source_summary.text = ar(f"المختار ({len(self.selected_sources)}): {s_txt}")
         else:
             self.ids.lbl_source_summary.text = ar("لم يتم اختيار أي تطبيق مصدر بعد.")
@@ -1366,7 +1629,7 @@ class RuleBuilderScreen(MDScreen):
         def build_row(item):
             pkg = item["package_name"]
 
-            def _on_active(inst, val, p=pkg):
+            def _on_active(inst, val, p=item["package_name"]):
                 if val:
                     temp_selected.add(p)
                 else:
@@ -1376,41 +1639,35 @@ class RuleBuilderScreen(MDScreen):
             row = MDBoxLayout(
                 orientation="horizontal",
                 size_hint_y=None,
-                height=dp(56),
-                spacing=dp(8),
-                padding=[dp(4), 0],
+                height=dp(58),
+                spacing=dp(10),
+                padding=[dp(6), 0],
             )
             cb = MDCheckbox(
                 active=pkg in temp_selected,
                 size_hint=(None, None),
-                size=(dp(36), dp(36)),
+                size=(dp(34), dp(34)),
                 pos_hint={"center_y": 0.5},
             )
             cb.bind(active=_on_active)
-
-            lbl_col = MDBoxLayout(orientation="vertical")
-            lbl_name = MDLabel(
-                text=ar(item["name"]),
-                font_name=ARABIC_FONT,
-                font_size="14sp",
-                bold=True,
-                halign="right",
-                theme_text_color="Custom",
-                text_color=THEME["text"],
-            )
-            lbl_pkg = MDLabel(
-                text=pkg,
-                font_name=ARABIC_FONT,
-                font_size="11sp",
-                halign="right",
-                theme_text_color="Custom",
-                text_color=THEME["muted"],
-            )
-            lbl_col.add_widget(lbl_name)
-            lbl_col.add_widget(lbl_pkg)
-
             row.add_widget(cb)
-            row.add_widget(lbl_col)
+
+            text = (
+                f"[b][color={THEME_HEX['text']}]{ar(item['name'])}[/color][/b]\n"
+                f"[color={THEME_HEX['muted']}]{pkg}[/color]"
+            )
+            row.add_widget(
+                MDLabel(
+                    text=text,
+                    markup=True,
+                    font_name=ARABIC_FONT,
+                    font_size="13sp",
+                    halign="right",
+                    valign="middle",
+                    theme_text_color="Custom",
+                    text_color=THEME["text"],
+                )
+            )
 
             icon_path = item.get("icon_path") or ""
             if icon_path and os.path.exists(icon_path):
@@ -1418,7 +1675,7 @@ class RuleBuilderScreen(MDScreen):
                     Image(
                         source=icon_path,
                         size_hint=(None, None),
-                        size=(dp(34), dp(34)),
+                        size=(dp(30), dp(30)),
                         pos_hint={"center_y": 0.5},
                     )
                 )
@@ -1428,7 +1685,7 @@ class RuleBuilderScreen(MDScreen):
             if gen != state["gen"]:
                 return
             matched = state["matched"]
-            end = min(state["index"] + 12, len(matched))
+            end = min(state["index"] + 20, len(matched))
             for item in matched[state["index"]:end]:
                 list_box.add_widget(build_row(item))
             state["index"] = end
@@ -1463,13 +1720,26 @@ class RuleBuilderScreen(MDScreen):
                 start_render()
             else:
                 status_lbl.text = ar(
-                    "تعذر جلب التطبيقات. امنح صلاحية الاستخدام (Usage Access) ثم أعد المحاولة."
+                    "تعذر جلب التطبيقات. تأكد من صلاحية الاستخدام (Usage Access) ثم أعد المحاولة."
+                )
+                list_box.clear_widgets()
+                list_box.add_widget(
+                    MDRaisedButton(
+                        text=ar("إعادة المحاولة"),
+                        font_name=ARABIC_FONT,
+                        md_bg_color=THEME["accent"],
+                        text_color=THEME["bg_primary"],
+                        size_hint_y=None,
+                        height=dp(46),
+                        on_release=lambda x: load_apps(force=True),
+                    )
                 )
 
-        def load_apps():
-            if self._installed_apps:
+        def load_apps(force: bool = False):
+            if self._installed_apps and not force:
                 apply_apps(self._installed_apps)
                 return
+            status_lbl.text = ar("جارٍ تحميل قائمة التطبيقات...")
 
             def worker():
                 try:
@@ -1531,8 +1801,8 @@ class RuleBuilderScreen(MDScreen):
 
     def save_rule(self):
         app = MDApp.get_running_app()
-        if not app.db.can_modify_restrictions():
-            notify_snack("التعديل محظور خارج نافذة الـ 30 دقيقة.")
+        if self.editing_rule_id is not None and not app.db.can_modify_restrictions():
+            notify_snack("تعديل قاعدة موجودة محظور خارج نافذة الـ 30 دقيقة.")
             return
 
         name = self.ids.input_rule_name.text.strip()
@@ -1570,6 +1840,10 @@ class RuleBuilderScreen(MDScreen):
             notify_snack("تم تحديث القاعدة بنجاح.")
 
         app.sync_service_state()
+        try:
+            app.start_background_service()
+        except Exception:
+            traceback.print_exc()
         app.go_screen("dashboard")
 
     def delete_current_rule(self):
