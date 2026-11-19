@@ -15,25 +15,35 @@ public class AppDeviceAdminReceiver extends DeviceAdminReceiver {
 
     @Override
     public void onEnabled(Context context, Intent intent) {
-        Toast.makeText(context, "تم تفعيل حماية مشرف الجهاز للحظر المشروط", Toast.LENGTH_SHORT).show();
+        try {
+            Toast.makeText(context, "تم تفعيل حماية مشرف الجهاز للحظر المشروط", Toast.LENGTH_SHORT).show();
+        } catch (Exception ignored) {
+        }
     }
 
     @Override
     public CharSequence onDisableRequested(Context context, Intent intent) {
-        String state = readLockState(context);
-        if (!"UNLOCKED_WINDOW".equals(state)) {
-            Intent home = new Intent(Intent.ACTION_MAIN);
-            home.addCategory(Intent.CATEGORY_HOME);
-            home.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(home);
-            return "لا يمكن تعطيل الحماية أثناء القفل الصارم. ابدأ عداد الـ 24 ساعة من داخل التطبيق أولاً.";
+        try {
+            String state = readLockState(context);
+            if (!"UNLOCKED_WINDOW".equals(state)) {
+                Intent home = new Intent(Intent.ACTION_MAIN);
+                home.addCategory(Intent.CATEGORY_HOME);
+                home.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                context.startActivity(home);
+                return "لا يمكن تعطيل الحماية أثناء القفل الصارم. ابدأ عداد الـ 24 ساعة من داخل التطبيق أولاً.";
+            }
+            return "نافذة التعديل مفتوحة: يمكنك تعطيل مشرف الجهاز الآن.";
+        } catch (Exception e) {
+            return "تعذر التحقق من حالة القفل.";
         }
-        return "نافذة التعديل مفتوحة: يمكنك تعطيل مشرف الجهاز الآن.";
     }
 
     @Override
     public void onDisabled(Context context, Intent intent) {
-        Toast.makeText(context, "تم تعطيل صلاحية مشرف الجهاز", Toast.LENGTH_SHORT).show();
+        try {
+            Toast.makeText(context, "تم تعطيل صلاحية مشرف الجهاز", Toast.LENGTH_SHORT).show();
+        } catch (Exception ignored) {
+        }
     }
 
     private String readLockState(Context context) {

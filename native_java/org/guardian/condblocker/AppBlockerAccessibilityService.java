@@ -1,6 +1,7 @@
 package com.tareq.motiv_force;
 
 import android.accessibilityservice.AccessibilityService;
+import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -17,13 +18,28 @@ import java.util.Set;
 
 public class AppBlockerAccessibilityService extends AccessibilityService {
 
+    private static final String TAG = "Motiv_Force";
+
     private String lastLockState = "LOCKED";
     private boolean onboardingComplete = false;
     private long lastStateReadMs = 0;
+    private long lastDangerCheckMs = 0;
+    private long lastHomeMs = 0;
+    private String lastWrittenPkg = "";
     private final Set<String> blockedPackages = new HashSet<>();
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        // أي استثناء غير معالج داخل خدمة إمكانية الوصول يقتل عملية التطبيق
+        // بالكامل (لأنها تعمل داخل نفس العملية)، لذلك نعزل كل المنطق هنا.
+        try {
+            handleEvent(event);
+        } catch (Exception e) {
+            Log.e(TAG, "accessibility event failed", e);
+        }
+    }
+
+    private void handleEvent(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) {
             return;
         }
@@ -31,8 +47,11 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
         String pkg = event.getPackageName().toString();
         String myPkg = getPackageName();
 
-        // تجاهل إشعارات النظام العابرة واحتفظ بالتطبيق الحقيقي المفتوح
-        if (!"com.android.systemui".equals(pkg)) {
+        // تجاهل إشعارات النظام العابرة واحتفظ بالتطبيق الحقيقي المفتوح.
+        // الكتابة تحدث فقط عند تغيّر الحزمة: أحداث typeWindowContentChanged تنطلق
+        // عشرات المرات أثناء التمرير، وكانت الكتابة على القرص مع كل حدث تجمّد الواجهة.
+        if (!"com.android.systemui".equals(pkg) && !pkg.equals(lastWrittenPkg)) {
+            lastWrittenPkg = pkg;
             writeCurrentForegroundPackage(pkg);
         }
 
@@ -46,25 +65,44 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
         // منع فعلي لا يعتمد على نافذة الـ Overlay: أي تطبيق محظور لم يكتمل شرطه
         // يُخرج المستخدم منه فوراً إلى الشاشة الرئيسية.
         if (!myPkg.equals(pkg) && blockedPackages.contains(pkg)) {
-            performGlobalAction(GLOBAL_ACTION_HOME);
+            long nowHome = System.currentTimeMillis();
+            if (nowHome - lastHomeMs >= 800) {
+                lastHomeMs = nowHome;
+                performGlobalAction(GLOBAL_ACTION_HOME);
+            }
             return;
         }
 
-        // حماية ضد إيقاف التطبيق إجبارياً أو سحب Device Admin / Accessibility
+        // حماية ضد إيقاف التطبيق إجبارياً أو إلغاء التثبيت.
+        // لا نلمس شاشات الصلاحيات إطلاقاً: كان الاعتراض عليها يمنع المستخدم من
+        // منح الصلاحيات مرة أخرى بعد أي إلغاء، فيضطر لإعادة المحاولة مرات كثيرة.
         if ("com.android.settings".equals(pkg)
                 || pkg.contains("packageinstaller")
                 || pkg.contains("permissioncontroller")) {
 
             String cls = event.getClassName() != null ? event.getClassName().toString().toLowerCase() : "";
+            // شاشات الصلاحيات (الوصول للاستخدام، الظهور فوق التطبيقات،
+            // إمكانية الوصول، مشرف الجهاز) لا تُعترض أبداً حتى يستطيع
+            // المستخدم إعادة منح الصلاحيات في أي وقت.
+            if (cls.contains("accessibility")
+                    || cls.contains("deviceadmin")
+                    || cls.contains("permission")
+                    || cls.contains("usage")
+                    || cls.contains("overlay")
+                    || cls.contains("appops")
+                    || cls.contains("manage")) {
+                return;
+            }
+
+            long now = System.currentTimeMillis();
+            if (now - lastDangerCheckMs < 1000) {
+                return;
+            }
+            lastDangerCheckMs = now;
+
             AccessibilityNodeInfo root = getRootInActiveWindow();
 
-            boolean isDangerScreen = cls.contains("installedappdetails")
-                    || cls.contains("appinfo")
-                    || cls.contains("deviceadminadd")
-                    || cls.contains("deviceadminsettings")
-                    || cls.contains("accessibility")
-                    || cls.contains("uninstall");
-
+            boolean isDangerScreen = cls.contains("uninstall") && pkg.contains("packageinstaller");
             if (!isDangerScreen && root != null) {
                 isDangerScreen = containsDangerousKeywords(root, myPkg);
             }
