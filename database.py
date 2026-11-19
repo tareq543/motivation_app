@@ -14,11 +14,15 @@ LOCK_STATE_UNLOCKED_WINDOW = "UNLOCKED_WINDOW"
 # DEBUG_MODE = True  ->  عداد انتظار قصير (10 ثوانٍ) لتجربة التطبيق بسرعة.
 # قبل النشر على المستخدمين: اجعلها False لتعود 24 ساعة كما صُمّم.
 # ---------------------------------------------------------------------------
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 COOLDOWN_24H_SECONDS = 10.0 if DEBUG_MODE else 86400.0    # 10 ثوانٍ بدل 24 ساعة
 GRACE_WINDOW_30M_SECONDS = 1800.0 if DEBUG_MODE else 1800.0  # نافذة التعديل 30 دقيقة
 TAMPER_THRESHOLD_MS = 120000     # دقيقتان كحد أقصى للانحراف المسموح
+
+# عند تغيير طريقة حساب الاستخدام نرفع هذا الرقم لمسح الكاش القديم تلقائياً.
+# الإصدار 2 يصلح خللاً كان يضيف آلاف الدقائق عند حدث ACTIVITY_STOPPED.
+USAGE_CACHE_VERSION = 2
 
 
 class CondBlockerDB:
@@ -101,6 +105,18 @@ class CondBlockerDB:
                     cur.execute(
                         "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?);",
                         (k, v),
+                    )
+
+                # مسح كاش الاستخدام غير الصحيح القادم من إصدار أقدم.
+                cur.execute(
+                    "SELECT value FROM settings WHERE key = 'usage_cache_version';"
+                )
+                cache_row = cur.fetchone()
+                if cache_row is None or str(cache_row["value"]) != str(USAGE_CACHE_VERSION):
+                    cur.execute("DELETE FROM daily_usage_cache;")
+                    cur.execute(
+                        "INSERT OR REPLACE INTO settings (key, value) VALUES ('usage_cache_version', ?);",
+                        (str(USAGE_CACHE_VERSION),),
                     )
 
                 now_wall_ms = int(time.time() * 1000)
@@ -200,6 +216,10 @@ class CondBlockerDB:
         with self._lock:
             conn = self._connect()
             try:
+                # قفل كتابة فوري: التطبيق والخدمة الخلفية يستدعيان هذه الدالة
+                # من عمليتين مختلفتين. بدون هذا القفل يقرأ الاثنان نفس
+                # last_elapsed ثم يخصمان المدة مرتين.
+                conn.execute("BEGIN IMMEDIATE;")
                 row = conn.execute("SELECT * FROM lock_state WHERE id = 1;").fetchone()
                 state = row["state"]
                 remaining = float(row["remaining_seconds"])
@@ -238,21 +258,30 @@ class CondBlockerDB:
                         clock_tampered = 0
                         wall_offset = 0
                 else:
-                    # حدثت إعادة تشغيل للهاتف (elapsedRealtime عاد إلى 0)
-                    boot_elapsed_ms = now_elapsed_ms
+                    # now_elapsed أصغر من last_elapsed: إمّا استدعاء وصل متأخراً
+                    # من العملية الأخرى (فرق ثوانٍ)، وإمّا إعادة تشغيل حقيقية.
+                    inversion_ms = last_elapsed - now_elapsed_ms
+                    if inversion_ms <= (5 * 60 * 1000):
+                        # مجرد وصول غير مرتب؛ نتجاهله تماماً ولا نحرّك العدّاد.
+                        # الخطأ القديم كان يعتبره إعادة تشغيل ويخصم مدة تشغيل
+                        # الجهاز كاملة (آلاف الثواني) فينهي نافذة الـ 30 دقيقة.
+                        conn.rollback()
+                        return {
+                            "state": state,
+                            "remaining_seconds": remaining,
+                            "trusted_wall_ms": trusted_wall,
+                            "clock_tampered": bool(clock_tampered),
+                            "wall_offset_ms": wall_offset,
+                        }
+
+                    # إعادة تشغيل فعلية: نعتمد فرق ساعة الحائط لفترة الإطفاء.
+                    # لا نستخدم uptime الحالي كفارق زمني أبداً.
                     wall_gap_ms = now_wall_ms - last_wall
-                    if (
-                        clock_tampered == 0
-                        and 0 < wall_gap_ms < (7 * 86400 * 1000)
-                        and wall_gap_ms >= boot_elapsed_ms
-                    ):
-                        # التقدم الفعلي خلال الإطفاء + التشغيل
+                    if 0 < wall_gap_ms < (7 * 86400 * 1000):
                         trusted_wall = trusted_wall + wall_gap_ms
                         delta_sec = wall_gap_ms / 1000.0
                     else:
-                        # في حال وجود تلاعب مسبق أو ارتداد ساعة، نحتسب وقت التشغيل فقط
-                        trusted_wall = trusted_wall + boot_elapsed_ms
-                        delta_sec = boot_elapsed_ms / 1000.0
+                        delta_sec = 0.0
 
                 # تحديث مؤقتات القفل الصارم
                 if delta_sec > 0:
@@ -319,7 +348,9 @@ class CondBlockerDB:
                 if row["state"] == LOCK_STATE_LOCKED:
                     conn.execute("""
                         UPDATE lock_state
-                        SET state = ?, remaining_seconds = ?, last_elapsed_ms = ?, last_wall_ms = ?
+                        SET state = ?, remaining_seconds = ?,
+                            last_elapsed_ms = MAX(last_elapsed_ms, ?),
+                            last_wall_ms = MAX(last_wall_ms, ?)
                         WHERE id = 1;
                     """, (LOCK_STATE_WAITING_24H, COOLDOWN_24H_SECONDS, now_elapsed_ms, now_wall_ms))
                     conn.commit()

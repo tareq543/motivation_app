@@ -361,6 +361,12 @@ class UsageTracker:
 
         active_start: dict[str, int] = {}
         accumulated_ms: dict[str, int] = {}
+        # حزم ظهر لها حدث فتح داخل نافذة الاستعلام. أي حدث إغلاق لاحق لها
+        # يكون مجرد تكرار (PAUSED ثم STOPPED) ولا يجوز أن يُحسب كجلسة قديمة.
+        seen_foreground: set[str] = set()
+        # حزم لم يظهر لها فتح داخل النافذة، وافترضنا أنها كانت مفتوحة قبل
+        # بداية الدورة؛ نحسبها مرة واحدة فقط حتى لا تتضاعف آلاف المرات.
+        prewindow_counted: set[str] = set()
 
         while events.hasNextEvent():
             events.getNextEvent(ev)
@@ -372,6 +378,7 @@ class UsageTracker:
             ts = int(ev.getTimeStamp())
 
             if etype == EVENT_FOREGROUND:
+                seen_foreground.add(pkg)
                 # تجنب الكتابة فوق جلسة مفتوحة لنفس الحزمة
                 if pkg not in active_start:
                     active_start[pkg] = ts
@@ -382,11 +389,16 @@ class UsageTracker:
                     clamped_end = min(ts, query_end)
                     if clamped_end > clamped_start:
                         accumulated_ms[pkg] = accumulated_ms.get(pkg, 0) + (clamped_end - clamped_start)
-                elif ts > cycle_start_sys:
-                    # التطبيق كان مفتوحاً قبل بداية نافذة الاستعلام وأغلق بعد وقت التصفير
+                elif (
+                    pkg not in seen_foreground
+                    and pkg not in prewindow_counted
+                    and ts > cycle_start_sys
+                ):
+                    # التطبيق كان مفتوحاً قبل بداية نافذة الاستعلام وأغلق بعد
+                    # وقت التصفير. هذا الاحتمال نادر جداً، ويُحسب مرة واحدة.
+                    prewindow_counted.add(pkg)
                     clamped_end = min(ts, query_end)
-                    if clamped_end > cycle_start_sys:
-                        accumulated_ms[pkg] = accumulated_ms.get(pkg, 0) + (clamped_end - cycle_start_sys)
+                    accumulated_ms[pkg] = accumulated_ms.get(pkg, 0) + (clamped_end - cycle_start_sys)
 
         # إذا كان هناك تطبيق لا يزال مفتوحاً في الواجهة حتى هذه اللحظة
         for pkg, start_ts in active_start.items():
@@ -394,12 +406,20 @@ class UsageTracker:
             if query_end > clamped_start:
                 accumulated_ms[pkg] = accumulated_ms.get(pkg, 0) + (query_end - clamped_start)
 
-        measured_sec = {pkg: ms / 1000.0 for pkg, ms in accumulated_ms.items()}
+        # لا يمكن لأي تطبيق أن يُستخدم أكثر من الزمن المنقضي منذ بداية الدورة.
+        # هذا السقف يمنع أي قفزة شاذة في أحداث النظام من إظهار آلاف الدقائق.
+        max_possible_sec = max(0.0, (query_end - cycle_start_sys) / 1000.0)
+        measured_sec = {
+            pkg: min(ms / 1000.0, max_possible_sec)
+            for pkg, ms in accumulated_ms.items()
+        }
 
         # دمج مع الذاكرة المخبأة بحيث لا يتناقص الوقت أبداً إذا حاول المستخدم التلاعب بالساعة
-        merged: dict[str, float] = dict(cached_usage)
+        merged: dict[str, float] = {
+            pkg: min(sec, max_possible_sec) for pkg, sec in cached_usage.items()
+        }
         for pkg, sec in measured_sec.items():
-            merged[pkg] = max(merged.get(pkg, 0.0), sec)
+            merged[pkg] = min(max(merged.get(pkg, 0.0), sec), max_possible_sec)
 
         if merged:
             db.update_cached_usage(cycle_id, merged)
