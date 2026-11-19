@@ -1,7 +1,9 @@
 import os
 import sys
 import threading
+import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 
@@ -54,18 +56,22 @@ _DISABLE_BOX_SHADOWS = _disable_box_shadows()
 from kivy.clock import Clock
 from kivy.core.text import LabelBase
 from kivy.core.window import Window
+from kivy.factory import Factory
 from kivy.lang import Builder
 from kivy.metrics import dp
+from kivy.properties import BooleanProperty, StringProperty
 from kivy.uix.image import Image
 from kivy.uix.label import Label
+from kivy.uix.recycleboxlayout import RecycleBoxLayout
+from kivy.uix.recycleview import RecycleView
 from kivy.uix.scrollview import ScrollView
 from kivy.utils import get_color_from_hex
 from kivymd.app import MDApp
 from kivymd.uix.boxlayout import MDBoxLayout
-from kivymd.uix.button import MDFlatButton, MDIconButton, MDRaisedButton
+from kivymd.uix.button import MDFillRoundFlatButton, MDFlatButton, MDIconButton
 from kivymd.uix.card import MDCard
 from kivymd.uix.dialog import MDDialog
-from kivymd.uix.label import MDLabel
+from kivymd.uix.label import MDIcon, MDLabel
 from kivymd.uix.progressbar import MDProgressBar
 from kivymd.uix.screen import MDScreen
 from kivymd.uix.screenmanager import MDScreenManager
@@ -80,22 +86,36 @@ from database import (
     LOCK_STATE_UNLOCKED_WINDOW,
     LOCK_STATE_WAITING_24H,
 )
-from usage_tracker import IS_ANDROID, UsageTracker, get_android_clocks
+from usage_tracker import (
+    IS_ANDROID,
+    UsageTracker,
+    detach_current_thread,
+    get_android_clocks,
+)
 
 try:
     import arabic_reshaper
     from bidi.algorithm import get_display
 
+    _AR_CACHE: dict[str, str] = {}
+
     def ar(text: str) -> str:
         if not text:
             return ""
         text = str(text)
+        cached = _AR_CACHE.get(text)
+        if cached is not None:
+            return cached
         has_arabic = any("\u0600" <= c <= "\u06FF" or "\u0750" <= c <= "\u077F" for c in text)
         if not has_arabic:
             return text
         try:
             reshaped = arabic_reshaper.reshape(text)
-            return get_display(reshaped)
+            result = get_display(reshaped)
+            if len(_AR_CACHE) > 1200:
+                _AR_CACHE.clear()
+            _AR_CACHE[text] = result
+            return result
         except Exception:
             return text
 except Exception:
@@ -122,7 +142,7 @@ GR_LABEL = _dur(GRACE_WINDOW_30M_SECONDS)  # "30 دقيقة"
 
 if IS_ANDROID:
     try:
-        from jnius import autoclass, cast
+        from jnius import autoclass, cast, PythonJavaClass, java_method
 
         PythonActivity = autoclass("org.kivy.android.PythonActivity")
         Context = autoclass("android.content.Context")
@@ -130,12 +150,43 @@ if IS_ANDROID:
         Uri = autoclass("android.net.Uri")
         Settings = autoclass("android.provider.Settings")
         AppOpsManager = autoclass("android.app.AppOpsManager")
+        UsageStatsManager = autoclass("android.app.usage.UsageStatsManager")
         Process = autoclass("android.os.Process")
+        System = autoclass("java.lang.System")
         ComponentName = autoclass("android.content.ComponentName")
         DevicePolicyManager = autoclass("android.app.admin.DevicePolicyManager")
         BuildVersion = autoclass("android.os.Build$VERSION")
         JString = autoclass("java.lang.String")
         Toast = autoclass("android.widget.Toast")
+
+        _TOAST_REFS = []
+
+        class _ToastRunnable(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+            __javacontext__ = "app"
+
+            def __init__(self, text: str):
+                super().__init__()
+                self.text = text
+
+            @java_method("()V")
+            def run(self):
+                try:
+                    act = PythonActivity.mActivity
+                    if act is not None:
+                        Toast.makeText(
+                            act.getApplicationContext(),
+                            JString(str(self.text)),
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        _TOAST_REFS.remove(self)
+                    except Exception:
+                        pass
+
     except Exception:
         traceback.print_exc()
 
@@ -199,136 +250,475 @@ print(f"[FONT] using: {ARABIC_FONT} from {_arabic_font_path}")
 
 
 THEME_HEX = {
-    "bg_primary": "#080C16",
-    "bg_secondary": "#0E1626",
-    "card": "#141D31",
-    "card_hover": "#1B2740",
-    "border": "#233149",
-    "accent": "#FF7A18",
-    "accent_soft": "#FFB067",
-    "cyan": "#22D3EE",
-    "warning": "#F59E0B",
-    "text": "#F2F6FC",
-    "muted": "#93A4BF",
-    "success": "#22C55E",
-    "danger": "#F43F5E",
+    "bg_primary": "#070B12",
+    "bg_secondary": "#0C1420",
+    "card": "#111A2A",
+    "card_hover": "#182337",
+    "border": "#22304A",
+    "accent": "#FF8A3D",
+    "accent_soft": "#FFC08A",
+    "cyan": "#38E0C8",
+    "warning": "#FBBF24",
+    "text": "#F5F8FF",
+    "muted": "#8FA2BE",
+    "success": "#34D399",
+    "danger": "#FB7185",
 }
 
 THEME = {k: get_color_from_hex(v) for k, v in THEME_HEX.items()}
 
 
+_PICKER_STATE = {"on_toggle": None}
+_ICON_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="motiv-icon")
+
+
+class AppPickRow(MDBoxLayout):
+    """صف واحد في قائمة اختيار التطبيقات (يُعاد استخدامه عبر RecycleView)."""
+
+    app_name = StringProperty("")
+    pkg = StringProperty("")
+    selected = BooleanProperty(False)
+    icon_path = StringProperty("")
+
+    def on_checkbox(self, active: bool):
+        if active == self.selected:
+            return
+        self.selected = active
+        cb = _PICKER_STATE.get("on_toggle")
+        if cb is not None:
+            try:
+                cb(self.pkg, active)
+            except Exception:
+                traceback.print_exc()
+
+    def on_pkg(self, *args):
+        pkg = self.pkg
+        self.icon_path = ""
+        if pkg:
+            Clock.schedule_once(lambda dt: self._load_icon(pkg), 0)
+
+    def _load_icon(self, pkg: str):
+        if pkg != self.pkg:
+            return
+        app = MDApp.get_running_app()
+        tracker = getattr(app, "tracker", None) if app is not None else None
+        if tracker is None:
+            return
+
+        def work():
+            try:
+                return tracker.get_app_icon_path(pkg)
+            except Exception:
+                return ""
+            finally:
+                detach_current_thread()
+
+        future = _ICON_POOL.submit(work)
+
+        def done(fut):
+            try:
+                path = fut.result() or ""
+            except Exception:
+                return
+            Clock.schedule_once(lambda dt: self._set_icon(pkg, path), 0)
+
+        future.add_done_callback(done)
+
+    def _set_icon(self, pkg: str, path: str):
+        if pkg == self.pkg:
+            self.icon_path = path
+
+
+def _shorten(text, limit: int = 34) -> str:
+    text = "" if text is None else str(text)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _tint(color: str, alpha: float = 0.16):
+    r, g, b, _a = THEME[color]
+    return (r, g, b, alpha)
+
+
+def _wrap_label(text="", size="12.5sp", color="muted", bold=False, markup=False):
+    lbl = Factory.WrapLabel()
+    lbl.text = ar(text)
+    lbl.font_size = size
+    lbl.bold = bold
+    lbl.markup = markup
+    lbl.theme_text_color = "Custom"
+    lbl.text_color = THEME[color]
+    return lbl
+
+
+def _rtl_label(text="", size="13sp", color="text", bold=False, height=24):
+    lbl = Factory.RtlLabel()
+    lbl.text = ar(text)
+    lbl.font_size = size
+    lbl.bold = bold
+    lbl.height = dp(height)
+    lbl.theme_text_color = "Custom"
+    lbl.text_color = THEME[color]
+    return lbl
+
+
+def _chip(text: str, color: str, width: int = 84, height: int = 26, font_size: str = "11sp"):
+    card = MDCard(
+        md_bg_color=THEME[color],
+        radius=[dp(13), dp(13), dp(13), dp(13)],
+        padding=0,
+        size_hint=(None, None),
+        size=(dp(width), dp(height)),
+    )
+    card.add_widget(
+        MDLabel(
+            text=ar(text),
+            font_name=ARABIC_FONT,
+            font_size=font_size,
+            bold=True,
+            halign="center",
+            valign="middle",
+            theme_text_color="Custom",
+            text_color=THEME["bg_primary"],
+        )
+    )
+    return card
+
+
+def _icon_badge(icon: str, color: str, size: int = 40):
+    card = MDCard(
+        md_bg_color=_tint(color),
+        radius=[dp(size * 0.34)] * 4,
+        padding=0,
+        size_hint=(None, None),
+        size=(dp(size), dp(size)),
+    )
+    card.add_widget(
+        MDIcon(
+            icon=icon,
+            font_size=f"{int(size * 0.55)}sp",
+            halign="center",
+            valign="middle",
+            theme_icon_color="Custom",
+            icon_color=THEME[color],
+        )
+    )
+    return card
+
+
+def _rounded_button(
+    text: str,
+    bg: str,
+    fg: str,
+    on_release,
+    height: int = 44,
+    font_size: str = "13sp",
+    bold: bool = False,
+    width=None,
+):
+    btn = MDFillRoundFlatButton(
+        text=ar(text),
+        font_name=ARABIC_FONT,
+        font_size=font_size,
+        md_bg_color=THEME[bg],
+        text_color=THEME[fg],
+        size_hint=(None if width else 1, None),
+        height=dp(height),
+    )
+    if width:
+        btn.width = dp(width)
+    btn.bind(on_release=lambda *a: on_release())
+    return btn
+
+
 KV = f"""
 #:import get_color_from_hex kivy.utils.get_color_from_hex
 
-<DarkCard@MDCard>:
+<WrapLabel@MDLabel>:
+    font_name: "{ARABIC_FONT}"
+    line_height: 1.3
+    size_hint_y: None
+    text_size: self.width, None
+    height: self.texture_size[1]
+    valign: "top"
+    halign: "right"
+
+<RtlLabel@MDLabel>:
+    font_name: "{ARABIC_FONT}"
+    line_height: 1.3
+    size_hint_y: None
+    height: dp(24)
+    halign: "right"
+    text_size: self.width, None
+    valign: "middle"
+
+<Card@MDCard>:
     md_bg_color: get_color_from_hex("{THEME_HEX['card']}")
     line_color: get_color_from_hex("{THEME_HEX['border']}")
     line_width: dp(1)
     radius: [dp(22), dp(22), dp(22), dp(22)]
-    padding: dp(18)
-    spacing: dp(12)
+    padding: dp(16)
+    spacing: dp(10)
     size_hint_y: None
     height: self.minimum_height
 
-<PillLabel@MDLabel>:
+<SectionCaption@MDLabel>:
     font_name: "{ARABIC_FONT}"
-    markup: False
-    halign: "right"
-    valign: "middle"
+    font_size: "11sp"
+    bold: True
     size_hint_y: None
-    height: dp(24)
+    height: dp(18)
+    halign: "right"
+    text_size: self.width, None
+    theme_text_color: "Custom"
+    text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+<AppPickRow>:
+    orientation: "horizontal"
+    spacing: dp(10)
+    padding: [dp(8), dp(5)]
+    size_hint_y: None
+    height: dp(62)
+    canvas.before:
+        Color:
+            rgba: (1, 0.48, 0.24, 0.16) if root.selected else (0, 0, 0, 0)
+        RoundedRectangle:
+            pos: self.pos
+            size: self.size
+            radius: [dp(14), dp(14), dp(14), dp(14)]
+    MDCheckbox:
+        id: cb
+        active: root.selected
+        on_active: root.on_checkbox(self.active)
+        size_hint: None, None
+        size: dp(32), dp(32)
+        pos_hint: {{"center_y": 0.5}}
+    MDBoxLayout:
+        orientation: "vertical"
+        spacing: dp(1)
+        WrapLabel:
+            text: root.app_name
+            font_size: "13.5sp"
+            bold: True
+            text_color: get_color_from_hex("{THEME_HEX['text']}")
+        MDLabel:
+            text: root.pkg
+            font_name: "{ARABIC_FONT}"
+            font_size: "10.5sp"
+            halign: "right"
+            text_size: self.width, None
+            theme_text_color: "Custom"
+            text_color: get_color_from_hex("{THEME_HEX['muted']}")
+            size_hint_y: None
+            height: dp(15)
+    Image:
+        source: root.icon_path
+        opacity: 1 if root.icon_path else 0
+        size_hint: None, None
+        size: dp(30), dp(30)
+        pos_hint: {{"center_y": 0.5}}
 
 <OnboardingScreen>:
     md_bg_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
+    canvas.before:
+        Color:
+            rgba: 1, 0.48, 0.10, 0.07
+        Ellipse:
+            pos: self.width * 0.52, self.height * 0.80
+            size: dp(340), dp(340)
+        Color:
+            rgba: 0.13, 0.83, 0.93, 0.05
+        Ellipse:
+            pos: -dp(90), self.height * 0.12
+            size: dp(280), dp(280)
     MDBoxLayout:
         orientation: "vertical"
-        padding: dp(18)
-        spacing: dp(14)
+        padding: [dp(16), dp(20), dp(16), dp(12)]
+        spacing: dp(12)
 
-        MDLabel:
-            id: lbl_title
-            text: ""
-            font_name: "{ARABIC_FONT}"
-            font_size: "22sp"
-            bold: True
-            theme_text_color: "Custom"
-            text_color: get_color_from_hex("{THEME_HEX['text']}")
-            halign: "center"
+        MDBoxLayout:
             size_hint_y: None
-            height: dp(38)
+            height: dp(62)
+            spacing: dp(12)
 
-        MDLabel:
-            id: lbl_sub
-            text: ""
-            font_name: "{ARABIC_FONT}"
-            font_size: "13sp"
-            theme_text_color: "Custom"
-            text_color: get_color_from_hex("{THEME_HEX['muted']}")
-            halign: "center"
-            size_hint_y: None
-            height: dp(48)
+            MDCard:
+                size_hint: None, None
+                size: dp(54), dp(54)
+                radius: [dp(18), dp(18), dp(18), dp(18)]
+                md_bg_color: 1, 0.48, 0.10, 0.18
+                padding: 0
+                MDIcon:
+                    icon: "shield-star-outline"
+                    font_size: "27sp"
+                    theme_icon_color: "Custom"
+                    icon_color: get_color_from_hex("{THEME_HEX['accent']}")
+
+            MDBoxLayout:
+                orientation: "vertical"
+                spacing: dp(1)
+                MDLabel:
+                    text: "Motiv_Force"
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "23sp"
+                    bold: True
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['text']}")
+                MDLabel:
+                    text: app.ar("حماية ذكية من التشتت، بخطوات بسيطة")
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "11.5sp"
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+        Card:
+            id: perm_summary
+            orientation: "vertical"
+            padding: dp(14)
+            spacing: dp(8)
+
+            MDBoxLayout:
+                size_hint_y: None
+                height: dp(24)
+                MDLabel:
+                    id: lbl_perm_count
+                    text: "0 / 4"
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "12sp"
+                    bold: True
+                    halign: "right"
+                    size_hint_x: None
+                    width: dp(96)
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['accent_soft']}")
+                RtlLabel:
+                    id: lbl_title
+                    text: ""
+                    font_size: "15sp"
+                    bold: True
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['text']}")
+
+            MDProgressBar:
+                id: perm_progress
+                value: 0
+                size_hint_y: None
+                height: dp(8)
+                color: get_color_from_hex("{THEME_HEX['accent']}")
+
+            WrapLabel:
+                id: lbl_sub
+                text: ""
+                font_size: "12sp"
+                theme_text_color: "Custom"
+                text_color: get_color_from_hex("{THEME_HEX['muted']}")
 
         ScrollView:
+            bar_width: dp(2)
+            scroll_type: ["bars", "content"]
             MDBoxLayout:
                 id: perm_list
                 orientation: "vertical"
-                spacing: dp(12)
+                spacing: dp(10)
                 size_hint_y: None
                 height: self.minimum_height
+                padding: [0, dp(2), 0, dp(2)]
 
-        MDRaisedButton:
+        MDFillRoundFlatButton:
             id: btn_continue
             text: ""
             font_name: "{ARABIC_FONT}"
+            font_size: "15sp"
             md_bg_color: get_color_from_hex("{THEME_HEX['accent']}")
             text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
-            size_hint_x: 1
-            height: dp(48)
             disabled: True
+            size_hint_x: 1
+            size_hint_y: None
+            height: dp(52)
             on_release: root.enter_dashboard()
 
 <DashboardScreen>:
     md_bg_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
+    canvas.before:
+        Color:
+            rgba: 0.13, 0.83, 0.93, 0.05
+        Ellipse:
+            pos: self.width * 0.62, self.height * 0.86
+            size: dp(280), dp(280)
     MDBoxLayout:
         orientation: "vertical"
 
         MDBoxLayout:
             size_hint_y: None
-            height: dp(68)
+            height: dp(82)
             md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-            padding: [dp(18), dp(12)]
-            spacing: dp(12)
+            padding: [dp(14), dp(12)]
+            spacing: dp(8)
 
             MDIconButton:
-                icon: "cog"
+                icon: "cog-outline"
                 theme_icon_color: "Custom"
                 icon_color: get_color_from_hex("{THEME_HEX['accent']}")
+                pos_hint: {{"center_y": 0.5}}
                 on_release: app.go_screen("settings")
 
-            MDLabel:
-                id: dash_header
-                text: ""
-                font_name: "{ARABIC_FONT}"
-                font_size: "19sp"
-                bold: True
-                halign: "right"
-                theme_text_color: "Custom"
-                text_color: get_color_from_hex("{THEME_HEX['text']}")
-
-        ScrollView:
             MDBoxLayout:
                 orientation: "vertical"
-                padding: dp(14)
-                spacing: dp(14)
+                spacing: dp(1)
+                MDLabel:
+                    id: dash_header
+                    text: ""
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "20sp"
+                    bold: True
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['text']}")
+                MDLabel:
+                    id: dash_sub
+                    text: app.ar("Motiv_Force · حماية ذكية")
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "11sp"
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+        ScrollView:
+            bar_width: dp(2)
+            scroll_type: ["bars", "content"]
+            MDBoxLayout:
+                orientation: "vertical"
+                padding: [dp(14), dp(14), dp(14), dp(28)]
+                spacing: dp(12)
                 size_hint_y: None
                 height: self.minimum_height
 
-                DarkCard:
+                Card:
                     id: lock_card
                     orientation: "vertical"
+
                     MDBoxLayout:
                         size_hint_y: None
-                        height: dp(30)
+                        height: dp(40)
+                        spacing: dp(10)
+
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(40), dp(40)
+                            radius: [dp(14), dp(14), dp(14), dp(14)]
+                            md_bg_color: 0.96, 0.62, 0.04, 0.16
+                            padding: 0
+                            MDIcon:
+                                icon: "shield-alert-outline"
+                                font_size: "22sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['warning']}")
+
                         MDLabel:
                             id: lock_badge
                             text: ""
@@ -336,45 +726,128 @@ KV = f"""
                             bold: True
                             font_size: "15sp"
                             halign: "right"
+                            text_size: self.width, None
                             theme_text_color: "Custom"
                             text_color: get_color_from_hex("{THEME_HEX['warning']}")
+
                     MDLabel:
-                        id: lock_desc
+                        id: lock_timer
                         text: ""
                         font_name: "{ARABIC_FONT}"
-                        font_size: "13sp"
+                        bold: True
+                        font_size: "30sp"
                         halign: "right"
+                        text_size: self.width, None
+                        size_hint_y: None
+                        height: dp(38)
+                        opacity: 0
+                        theme_text_color: "Custom"
+                        text_color: get_color_from_hex("{THEME_HEX['cyan']}")
+
+                    WrapLabel:
+                        id: lock_desc
+                        text: ""
+                        font_size: "12.5sp"
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
-                        size_hint_y: None
-                        height: self.texture_size[1] + dp(10)
-                        text_size: self.width, None
-                    MDRaisedButton:
+
+                    MDFillRoundFlatButton:
                         id: btn_lock_action
                         text: ""
                         font_name: "{ARABIC_FONT}"
+                        font_size: "13sp"
                         md_bg_color: get_color_from_hex("{THEME_HEX['warning']}")
                         text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
                         size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(46)
                         on_release: root.on_lock_action()
 
                 MDBoxLayout:
                     size_hint_y: None
-                    height: dp(42)
-                    MDRaisedButton:
+                    height: dp(88)
+                    spacing: dp(10)
+
+                    Card:
+                        orientation: "vertical"
+                        padding: dp(14)
+                        spacing: dp(2)
+                        MDLabel:
+                            id: stat_rules
+                            text: "0"
+                            font_name: "{ARABIC_FONT}"
+                            font_size: "26sp"
+                            bold: True
+                            halign: "right"
+                            text_size: self.width, None
+                            size_hint_y: None
+                            height: dp(34)
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['accent']}")
+                        MDLabel:
+                            text: app.ar("قاعدة نشطة")
+                            font_name: "{ARABIC_FONT}"
+                            font_size: "11sp"
+                            halign: "right"
+                            text_size: self.width, None
+                            size_hint_y: None
+                            height: dp(16)
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+                    Card:
+                        orientation: "vertical"
+                        padding: dp(14)
+                        spacing: dp(2)
+                        MDLabel:
+                            id: stat_blocked
+                            text: "0"
+                            font_name: "{ARABIC_FONT}"
+                            font_size: "26sp"
+                            bold: True
+                            halign: "right"
+                            text_size: self.width, None
+                            size_hint_y: None
+                            height: dp(34)
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['cyan']}")
+                        MDLabel:
+                            text: app.ar("تطبيق محظور الآن")
+                            font_name: "{ARABIC_FONT}"
+                            font_size: "11sp"
+                            halign: "right"
+                            text_size: self.width, None
+                            size_hint_y: None
+                            height: dp(16)
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+                MDBoxLayout:
+                    size_hint_y: None
+                    height: dp(46)
+                    spacing: dp(8)
+
+                    MDFillRoundFlatButton:
                         id: btn_add_rule
                         text: ""
                         font_name: "{ARABIC_FONT}"
+                        font_size: "12sp"
                         md_bg_color: get_color_from_hex("{THEME_HEX['accent']}")
                         text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
+                        size_hint: None, None
+                        size: dp(138), dp(40)
+                        pos_hint: {{"center_y": 0.5}}
                         on_release: root.open_new_rule()
+
                     MDLabel:
                         id: rules_section_lbl
                         text: ""
                         font_name: "{ARABIC_FONT}"
-                        font_size: "16sp"
+                        font_size: "17sp"
                         bold: True
                         halign: "right"
+                        text_size: self.width, None
+                        valign: "middle"
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['text']}")
 
@@ -392,176 +865,227 @@ KV = f"""
 
         MDBoxLayout:
             size_hint_y: None
-            height: dp(68)
+            height: dp(74)
             md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-            padding: [dp(18), dp(12)]
+            padding: [dp(14), dp(10)]
+            spacing: dp(8)
+
             MDIconButton:
                 icon: "arrow-left"
                 theme_icon_color: "Custom"
                 icon_color: get_color_from_hex("{THEME_HEX['text']}")
+                pos_hint: {{"center_y": 0.5}}
                 on_release: app.go_screen("dashboard")
-            MDLabel:
-                id: rb_title
-                text: ""
-                font_name: "{ARABIC_FONT}"
-                font_size: "18sp"
-                bold: True
-                halign: "right"
-                theme_text_color: "Custom"
-                text_color: get_color_from_hex("{THEME_HEX['text']}")
 
-        ScrollView:
             MDBoxLayout:
                 orientation: "vertical"
-                padding: dp(14)
-                spacing: dp(14)
+                spacing: dp(1)
+                MDLabel:
+                    id: rb_title
+                    text: ""
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "18sp"
+                    bold: True
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['text']}")
+                MDLabel:
+                    text: app.ar("اختر التطبيقات والشرط، ثم فعّل القاعدة")
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "10.5sp"
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+        ScrollView:
+            bar_width: dp(2)
+            scroll_type: ["bars", "content"]
+            MDBoxLayout:
+                orientation: "vertical"
+                padding: [dp(14), dp(12), dp(14), dp(24)]
+                spacing: dp(12)
                 size_hint_y: None
                 height: self.minimum_height
 
-                DarkCard:
+                Card:
                     orientation: "vertical"
-                    MDLabel:
-                        id: lbl_rule_name
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['text']}")
-                        size_hint_y: None
-                        height: dp(24)
+
+                    SectionCaption:
+                        text: "اسم القاعدة"
                     MDTextField:
                         id: input_rule_name
                         font_name: "{ARABIC_FONT}"
+                        hint_text: app.ar("مثال: صباح بلا سوشال ميديا")
                         mode: "rectangle"
+                        size_hint_y: None
+                        height: dp(54)
 
-                DarkCard:
+                Card:
                     orientation: "vertical"
-                    MDLabel:
-                        id: lbl_target_sec
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['warning']}")
-                        size_hint_y: None
-                        height: dp(26)
-                    MDLabel:
-                        id: lbl_target_summary
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        font_size: "13sp"
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['muted']}")
-                        size_hint_y: None
-                        height: self.texture_size[1] + dp(10)
-                        text_size: self.width, None
-                    MDRaisedButton:
-                        id: btn_pick_targets
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        md_bg_color: get_color_from_hex("{THEME_HEX['warning']}")
-                        text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
-                        size_hint_x: 1
-                        on_release: root.open_app_picker("target")
-
-                DarkCard:
-                    orientation: "vertical"
-                    MDLabel:
-                        id: lbl_source_sec
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['cyan']}")
-                        size_hint_y: None
-                        height: dp(26)
-                    MDLabel:
-                        id: lbl_source_summary
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        font_size: "13sp"
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['muted']}")
-                        size_hint_y: None
-                        height: self.texture_size[1] + dp(10)
-                        text_size: self.width, None
-                    MDRaisedButton:
-                        id: btn_pick_sources
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        md_bg_color: get_color_from_hex("{THEME_HEX['cyan']}")
-                        text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
-                        size_hint_x: 1
-                        on_release: root.open_app_picker("source")
-
-                DarkCard:
-                    orientation: "vertical"
-                    MDLabel:
-                        id: lbl_minutes
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['text']}")
-                        size_hint_y: None
-                        height: dp(26)
-                    MDTextField:
-                        id: input_minutes
-                        font_name: "{ARABIC_FONT}"
-                        input_filter: "int"
-                        text: "20"
-                        mode: "rectangle"
 
                     MDBoxLayout:
                         size_hint_y: None
+                        height: dp(40)
+                        spacing: dp(10)
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(38), dp(38)
+                            radius: [dp(13), dp(13), dp(13), dp(13)]
+                            md_bg_color: 0.96, 0.62, 0.04, 0.16
+                            padding: 0
+                            MDIcon:
+                                icon: "cellphone-lock"
+                                font_size: "21sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['warning']}")
+                        RtlLabel:
+                            id: lbl_target_sec
+                            text: ""
+                            font_size: "14.5sp"
+                            bold: True
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['warning']}")
+
+                    WrapLabel:
+                        id: lbl_target_summary
+                        text: ""
+                        font_size: "12.5sp"
+                        theme_text_color: "Custom"
+                        text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+                    MDFillRoundFlatButton:
+                        id: btn_pick_targets
+                        text: ""
+                        font_name: "{ARABIC_FONT}"
+                        font_size: "13sp"
+                        md_bg_color: get_color_from_hex("{THEME_HEX['warning']}")
+                        text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
+                        size_hint_x: 1
+                        size_hint_y: None
                         height: dp(44)
+                        on_release: root.open_app_picker("target")
+
+                Card:
+                    orientation: "vertical"
+
+                    MDBoxLayout:
+                        size_hint_y: None
+                        height: dp(40)
+                        spacing: dp(10)
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(38), dp(38)
+                            radius: [dp(13), dp(13), dp(13), dp(13)]
+                            md_bg_color: 0.13, 0.83, 0.93, 0.14
+                            padding: 0
+                            MDIcon:
+                                icon: "check-decagram-outline"
+                                font_size: "21sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['cyan']}")
+                        RtlLabel:
+                            id: lbl_source_sec
+                            text: ""
+                            font_size: "14.5sp"
+                            bold: True
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['cyan']}")
+
+                    WrapLabel:
+                        id: lbl_source_summary
+                        text: ""
+                        font_size: "12.5sp"
+                        theme_text_color: "Custom"
+                        text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+                    MDFillRoundFlatButton:
+                        id: btn_pick_sources
+                        text: ""
+                        font_name: "{ARABIC_FONT}"
+                        font_size: "13sp"
+                        md_bg_color: get_color_from_hex("{THEME_HEX['cyan']}")
+                        text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
+                        size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(44)
+                        on_release: root.open_app_picker("source")
+
+                Card:
+                    orientation: "vertical"
+
+                    SectionCaption:
+                        text: app.ar("الوقت المطلوب")
+                    MDBoxLayout:
+                        size_hint_y: None
+                        height: dp(56)
+                        spacing: dp(10)
+                        MDTextField:
+                            id: input_minutes
+                            font_name: "{ARABIC_FONT}"
+                            input_filter: "int"
+                            text: "20"
+                            mode: "rectangle"
+                            size_hint_x: None
+                            width: dp(120)
+                        MDLabel:
+                            text: app.ar("دقيقة من تطبيقات المصدر")
+                            font_name: "{ARABIC_FONT}"
+                            font_size: "12.5sp"
+                            halign: "right"
+                            text_size: self.width, None
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+                    MDBoxLayout:
+                        size_hint_y: None
+                        height: dp(46)
                         spacing: dp(10)
                         MDSwitch:
                             id: switch_mode
                             active: False
+                            pos_hint: {{"center_y": 0.5}}
                             on_active: root.on_mode_switch(self.active)
                         MDLabel:
                             id: lbl_mode_title
                             text: ""
                             font_name: "{ARABIC_FONT}"
+                            font_size: "13sp"
+                            bold: True
                             halign: "right"
+                            text_size: self.width, None
                             theme_text_color: "Custom"
                             text_color: get_color_from_hex("{THEME_HEX['text']}")
 
-                    MDLabel:
+                    WrapLabel:
                         id: lbl_mode_desc
                         text: ""
-                        font_name: "{ARABIC_FONT}"
                         font_size: "12sp"
-                        halign: "right"
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
-                        size_hint_y: None
-                        height: self.texture_size[1] + dp(10)
-                        text_size: self.width, None
 
-                MDRaisedButton:
+                MDFillRoundFlatButton:
                     id: btn_save_rule
                     text: ""
                     font_name: "{ARABIC_FONT}"
+                    font_size: "15sp"
                     md_bg_color: get_color_from_hex("{THEME_HEX['accent']}")
                     text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
                     size_hint_x: 1
-                    height: dp(48)
+                    size_hint_y: None
+                    height: dp(52)
                     on_release: root.save_rule()
 
-                MDRaisedButton:
+                MDFlatButton:
                     id: btn_delete_rule
                     text: ""
                     font_name: "{ARABIC_FONT}"
-                    md_bg_color: get_color_from_hex("{THEME_HEX['danger']}")
-                    text_color: get_color_from_hex("{THEME_HEX['text']}")
+                    font_size: "13sp"
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['danger']}")
                     size_hint_x: 1
+                    size_hint_y: None
                     height: dp(44)
                     opacity: 0
                     disabled: True
@@ -574,138 +1098,200 @@ KV = f"""
 
         MDBoxLayout:
             size_hint_y: None
-            height: dp(68)
+            height: dp(74)
             md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-            padding: [dp(18), dp(12)]
+            padding: [dp(14), dp(10)]
+            spacing: dp(8)
+
             MDIconButton:
                 icon: "arrow-left"
                 theme_icon_color: "Custom"
                 icon_color: get_color_from_hex("{THEME_HEX['text']}")
+                pos_hint: {{"center_y": 0.5}}
                 on_release: app.go_screen("dashboard")
-            MDLabel:
-                id: settings_title
-                text: ""
-                font_name: "{ARABIC_FONT}"
-                font_size: "18sp"
-                bold: True
-                halign: "right"
-                theme_text_color: "Custom"
-                text_color: get_color_from_hex("{THEME_HEX['text']}")
 
-        ScrollView:
             MDBoxLayout:
                 orientation: "vertical"
-                padding: dp(14)
-                spacing: dp(14)
+                spacing: dp(1)
+                MDLabel:
+                    id: settings_title
+                    text: ""
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "18sp"
+                    bold: True
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['text']}")
+                MDLabel:
+                    text: app.ar("التحكم الكامل بإعدادات الحماية")
+                    font_name: "{ARABIC_FONT}"
+                    font_size: "10.5sp"
+                    halign: "right"
+                    text_size: self.width, None
+                    theme_text_color: "Custom"
+                    text_color: get_color_from_hex("{THEME_HEX['muted']}")
+
+        ScrollView:
+            bar_width: dp(2)
+            scroll_type: ["bars", "content"]
+            MDBoxLayout:
+                orientation: "vertical"
+                padding: [dp(14), dp(12), dp(14), dp(24)]
+                spacing: dp(12)
                 size_hint_y: None
                 height: self.minimum_height
 
-                DarkCard:
+                Card:
                     orientation: "vertical"
-                    MDLabel:
-                        id: lbl_reset_title
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['cyan']}")
+                    MDBoxLayout:
                         size_hint_y: None
-                        height: dp(26)
-                    MDLabel:
+                        height: dp(38)
+                        spacing: dp(10)
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(36), dp(36)
+                            radius: [dp(12), dp(12), dp(12), dp(12)]
+                            md_bg_color: 0.13, 0.83, 0.93, 0.14
+                            padding: 0
+                            MDIcon:
+                                icon: "clock-outline"
+                                font_size: "20sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['cyan']}")
+                        RtlLabel:
+                            id: lbl_reset_title
+                            text: ""
+                            font_size: "14sp"
+                            bold: True
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['text']}")
+                    WrapLabel:
                         id: lbl_reset_val
                         text: ""
-                        font_name: "{ARABIC_FONT}"
-                        font_size: "14sp"
-                        halign: "right"
+                        font_size: "12.5sp"
                         theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['text']}")
-                        size_hint_y: None
-                        height: dp(28)
-                    MDRaisedButton:
+                        text_color: get_color_from_hex("{THEME_HEX['muted']}")
+                    MDFillRoundFlatButton:
                         id: btn_pick_reset_time
                         text: ""
                         font_name: "{ARABIC_FONT}"
+                        font_size: "12.5sp"
                         md_bg_color: get_color_from_hex("{THEME_HEX['cyan']}")
                         text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
                         size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(44)
                         on_release: root.open_time_picker()
 
-                DarkCard:
+                Card:
                     orientation: "vertical"
-                    MDLabel:
-                        id: lbl_strict_title
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['warning']}")
+                    MDBoxLayout:
                         size_hint_y: None
-                        height: dp(26)
-                    MDLabel:
+                        height: dp(38)
+                        spacing: dp(10)
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(36), dp(36)
+                            radius: [dp(12), dp(12), dp(12), dp(12)]
+                            md_bg_color: 0.96, 0.62, 0.04, 0.16
+                            padding: 0
+                            MDIcon:
+                                icon: "lock-clock"
+                                font_size: "20sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['warning']}")
+                        RtlLabel:
+                            id: lbl_strict_title
+                            text: ""
+                            font_size: "14sp"
+                            bold: True
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['text']}")
+                    WrapLabel:
                         id: lbl_strict_status
                         text: ""
-                        font_name: "{ARABIC_FONT}"
-                        font_size: "13sp"
-                        halign: "right"
+                        font_size: "12.5sp"
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
-                        size_hint_y: None
-                        height: self.texture_size[1] + dp(10)
-                    MDRaisedButton:
+                    MDFillRoundFlatButton:
                         id: btn_strict_unlock
                         text: ""
                         font_name: "{ARABIC_FONT}"
+                        font_size: "12.5sp"
                         md_bg_color: get_color_from_hex("{THEME_HEX['warning']}")
                         text_color: get_color_from_hex("{THEME_HEX['bg_primary']}")
                         size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(44)
                         on_release: root.handle_strict_button()
 
-                DarkCard:
+                Card:
                     orientation: "vertical"
-                    MDLabel:
-                        id: lbl_perms_link
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['text']}")
+                    MDBoxLayout:
                         size_hint_y: None
-                        height: dp(26)
-                    MDRaisedButton:
+                        height: dp(38)
+                        spacing: dp(10)
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(36), dp(36)
+                            radius: [dp(12), dp(12), dp(12), dp(12)]
+                            md_bg_color: 1, 0.48, 0.10, 0.16
+                            padding: 0
+                            MDIcon:
+                                icon: "shield-account-outline"
+                                font_size: "20sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['accent']}")
+                        RtlLabel:
+                            id: lbl_perms_link
+                            text: ""
+                            font_size: "14sp"
+                            bold: True
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['text']}")
+                    MDFillRoundFlatButton:
                         id: btn_recheck_perms
                         text: ""
                         font_name: "{ARABIC_FONT}"
-                        md_bg_color: get_color_from_hex("{THEME_HEX['bg_secondary']}")
-                        text_color: get_color_from_hex("{THEME_HEX['cyan']}")
+                        font_size: "12.5sp"
+                        md_bg_color: get_color_from_hex("{THEME_HEX['card_hover']}")
+                        text_color: get_color_from_hex("{THEME_HEX['accent_soft']}")
                         size_hint_x: 1
+                        size_hint_y: None
+                        height: dp(44)
                         on_release: app.go_screen("onboarding")
 
-                DarkCard:
+                Card:
                     orientation: "vertical"
-                    MDLabel:
-                        id: lbl_tamper_title
-                        text: ""
-                        font_name: "{ARABIC_FONT}"
-                        bold: True
-                        halign: "right"
-                        theme_text_color: "Custom"
-                        text_color: get_color_from_hex("{THEME_HEX['danger']}")
+                    MDBoxLayout:
                         size_hint_y: None
-                        height: dp(26)
-                    MDLabel:
+                        height: dp(38)
+                        spacing: dp(10)
+                        MDCard:
+                            size_hint: None, None
+                            size: dp(36), dp(36)
+                            radius: [dp(12), dp(12), dp(12), dp(12)]
+                            md_bg_color: 0.96, 0.25, 0.37, 0.16
+                            padding: 0
+                            MDIcon:
+                                icon: "alert-octagon-outline"
+                                font_size: "20sp"
+                                theme_icon_color: "Custom"
+                                icon_color: get_color_from_hex("{THEME_HEX['danger']}")
+                        RtlLabel:
+                            id: lbl_tamper_title
+                            text: ""
+                            font_size: "14sp"
+                            bold: True
+                            theme_text_color: "Custom"
+                            text_color: get_color_from_hex("{THEME_HEX['text']}")
+                    WrapLabel:
                         id: lbl_tamper_logs
                         text: ""
-                        font_name: "{ARABIC_FONT}"
-                        font_size: "12sp"
-                        halign: "right"
+                        font_size: "11.5sp"
                         theme_text_color: "Custom"
                         text_color: get_color_from_hex("{THEME_HEX['muted']}")
-                        size_hint_y: None
-                        height: self.texture_size[1] + dp(10)
-                        text_size: self.width, None
 """
 
 
@@ -723,28 +1309,11 @@ def notify_snack(msg: str):
         try:
             act = PythonActivity.mActivity
             if act is not None:
-                from jnius import PythonJavaClass, java_method
-
-                class _ToastRunnable(PythonJavaClass):
-                    __javainterfaces__ = ["java/lang/Runnable"]
-                    __javacontext__ = "app"
-
-                    def __init__(self, text):
-                        super().__init__()
-                        self.text = text
-
-                    @java_method("()V")
-                    def run(self):
-                        try:
-                            Toast.makeText(
-                                act.getApplicationContext(),
-                                JString(str(self.text)),
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                        except Exception:
-                            pass
-
-                act.runOnUiThread(_ToastRunnable(msg))
+                # نحتفظ بمرجع بايثون للكائن حتى ينفذه Java، وإلا يجمعه GC
+                # فينهار التطبيق عند أول Toast.
+                runnable = _ToastRunnable(str(msg))
+                _TOAST_REFS.append(runnable)
+                act.runOnUiThread(runnable)
                 return
         except Exception:
             traceback.print_exc()
@@ -783,7 +1352,21 @@ class PermissionBridge:
                 Process.myUid(),
                 act.getPackageName(),
             )
-            return mode == AppOpsManager.MODE_ALLOWED
+            if mode == AppOpsManager.MODE_ALLOWED:
+                return True
+            # بعض أجهزة OEM ترجع MODE_DEFAULT رغم أن المستخدم منح الصلاحية،
+            # فيظل التطبيق يطلبها للأبد. نتحقق هنا من وجود بيانات استخدام فعلية.
+            if mode == AppOpsManager.MODE_DEFAULT:
+                try:
+                    usm = act.getSystemService(Context.USAGE_STATS_SERVICE)
+                    now_ms = int(System.currentTimeMillis())
+                    stats = usm.queryUsageStats(
+                        UsageStatsManager.INTERVAL_DAILY, now_ms - 3600000, now_ms
+                    )
+                    return stats is not None and stats.size() > 0
+                except Exception:
+                    return False
+            return False
         except Exception:
             return False
 
@@ -921,21 +1504,130 @@ class PermissionBridge:
 
 
 class OnboardingScreen(MDScreen):
+    _cards = None
+    _completed = False
+
+    @staticmethod
+    def _items(state):
+        return [
+            (
+                "chart-timeline-variant",
+                "الوصول لبيانات الاستخدام",
+                "لقراءة دقائق استخدام التطبيقات بدقة يومياً.",
+                state[0],
+                PermissionBridge.open_usage_settings,
+            ),
+            (
+                "layers-outline",
+                "الظهور فوق التطبيقات",
+                "لعرض شاشة الحظر الفورية عند فتح تطبيق مقيد.",
+                state[1],
+                PermissionBridge.open_overlay_settings,
+            ),
+            (
+                "gesture-tap",
+                "خدمة إمكانية الوصول",
+                "لمراقبة التطبيق المفتوح ومنع التلاعب أثناء القفل.",
+                state[2],
+                PermissionBridge.open_accessibility_settings,
+            ),
+            (
+                "shield-lock-outline",
+                "مشرف الجهاز",
+                "لمنع إلغاء تثبيت التطبيق أثناء القفل الصارم.",
+                state[3],
+                PermissionBridge.request_device_admin,
+            ),
+        ]
+
     def on_pre_enter(self, *args):
+        if getattr(self, "_ev", None) is not None:
+            try:
+                self._ev.cancel()
+            except Exception:
+                pass
         self.ids.lbl_title.text = ar("تهيئة الصلاحيات الأساسية")
         self.ids.lbl_sub.text = ar(
-            "لضمان عمل الحظر المشروط والحماية الصارمة دون توقف، يجب تفعيل الصلاحيات الأربع التالية:"
+            "فعّل الصلاحيات الأربع التالية مرة واحدة، وسنعتني بالباقي:"
         )
         self.ids.btn_continue.text = ar("متابعة إلى لوحة التحكم")
         self._last_perm_state = None
+        try:
+            self._ensure_cards()
+        except Exception:
+            traceback.print_exc()
         self.refresh_permissions(force=True)
-        self._ev = Clock.schedule_interval(lambda dt: self.refresh_permissions(), 1.5)
+        self._ev = Clock.schedule_interval(lambda dt: self.refresh_permissions(), 2.0)
 
     def on_pre_leave(self, *args):
-        if hasattr(self, "_ev") and self._ev:
-            self._ev.cancel()
+        if getattr(self, "_ev", None) is not None:
+            try:
+                self._ev.cancel()
+            except Exception:
+                pass
+            self._ev = None
+
+    def _ensure_cards(self):
+        """تُبنى البطاقات مرة واحدة فقط، ثم نحدّث نصوصها بدل إعادة بنائها."""
+        if self._cards:
+            return
+        self._cards = []
+        for icon, title, desc, _granted, action in self._items((False,) * 4):
+            card = MDCard(
+                md_bg_color=THEME["card"],
+                line_color=THEME["border"],
+                line_width=dp(1),
+                radius=[dp(20)] * 4,
+                padding=dp(14),
+                spacing=dp(10),
+                orientation="vertical",
+                size_hint_y=None,
+                height=dp(10),
+            )
+            card.bind(minimum_height=card.setter("height"))
+
+            top = MDBoxLayout(size_hint_y=None, height=dp(42), spacing=dp(10))
+            top.add_widget(_icon_badge(icon, "accent", 38))
+            col = MDBoxLayout(orientation="vertical", spacing=dp(1))
+            col.add_widget(_rtl_label(title, "14sp", "text", True, 22))
+            col.add_widget(_wrap_label(desc, "11.5sp", "muted"))
+            top.add_widget(col)
+
+            bottom = MDBoxLayout(size_hint_y=None, height=dp(36), spacing=dp(8))
+            status = _chip("غير مفعلة", "warning", 88, 24, "10.5sp")
+            status_lbl = status.children[0]
+            btn = _rounded_button(
+                "تفعيل الآن",
+                "accent",
+                "bg_primary",
+                (lambda cb=action: self._run_action(cb)),
+                36,
+                "11.5sp",
+                True,
+                140,
+            )
+            bottom.add_widget(btn)
+            bottom.add_widget(MDBoxLayout())
+            bottom.add_widget(status)
+
+            card.add_widget(top)
+            card.add_widget(bottom)
+            self.ids.perm_list.add_widget(card)
+            self._cards.append(
+                {"card": card, "status": status, "status_lbl": status_lbl, "btn": btn}
+            )
+
+    def _run_action(self, action):
+        try:
+            action()
+        except Exception:
+            traceback.print_exc()
+            notify_snack("تعذر فتح إعدادات الصلاحية. حاول مرة أخرى.")
 
     def refresh_permissions(self, force: bool = False):
+        app = MDApp.get_running_app()
+        if app is not None and getattr(app, "_paused", False):
+            return
         try:
             state_tuple = (
                 PermissionBridge.has_usage_access(),
@@ -946,100 +1638,36 @@ class OnboardingScreen(MDScreen):
             if not force and getattr(self, "_last_perm_state", None) == state_tuple:
                 return
             self._last_perm_state = state_tuple
+            if not self._cards:
+                self._ensure_cards()
 
-            container = self.ids.perm_list
-            container.clear_widgets()
+            for entry, granted in zip(self._cards, state_tuple):
+                entry["status_lbl"].text = ar("مفعلة" if granted else "غير مفعلة")
+                entry["status"].md_bg_color = (
+                    THEME["success"] if granted else THEME["warning"]
+                )
+                btn = entry["btn"]
+                btn.text = ar("تم التفعيل" if granted else "تفعيل الآن")
+                btn.md_bg_color = (
+                    THEME["card_hover"] if granted else THEME["accent"]
+                )
+                btn.text_color = (
+                    THEME["success"] if granted else THEME["bg_primary"]
+                )
+                btn.disabled = granted
 
-            items = [
-                (
-                    "الوصول لبيانات الاستخدام (Usage Access)",
-                    "لقراءة دقائق استخدام التطبيقات بدقة يومياً.",
-                    state_tuple[0],
-                    PermissionBridge.open_usage_settings,
-                ),
-                (
-                    "الظهور فوق التطبيقات (Display Over Other Apps)",
-                    "لعرض شاشة الحظر الفورية عند فتح تطبيق مقيد.",
-                    state_tuple[1],
-                    PermissionBridge.open_overlay_settings,
-                ),
-                (
-                    "خدمة إمكانية الوصول (Accessibility Service)",
-                    "للمراقبة الفورية ومنع الإيقاف الإجباري أو سحب الصلاحيات.",
-                    state_tuple[2],
-                    PermissionBridge.open_accessibility_settings,
-                ),
-                (
-                    "مشرف الجهاز (Device Admin)",
-                    "لمنع إلغاء تثبيت التطبيق أثناء حالة القفل الصارم.",
-                    state_tuple[3],
-                    PermissionBridge.request_device_admin,
-                ),
-            ]
+            done = sum(1 for s in state_tuple if s)
+            self.ids.perm_progress.value = done * 25
+            self.ids.lbl_perm_count.text = ar(f"{done} / 4 مكتملة")
 
             all_ok = all(state_tuple)
-            for title, desc, granted, action in items:
-                card = MDCard(
-                    md_bg_color=THEME["card"],
-                    radius=[dp(14), dp(14), dp(14), dp(14)],
-                    padding=dp(14),
-                    spacing=dp(8),
-                    orientation="vertical",
-                    size_hint_y=None,
-                    height=dp(136),
-                )
-                top = MDBoxLayout(size_hint_y=None, height=dp(28))
-                status_lbl = MDLabel(
-                    text=ar("مفعلة" if granted else "غير مفعلة"),
-                    font_name=ARABIC_FONT,
-                    bold=True,
-                    font_size="13sp",
-                    theme_text_color="Custom",
-                    text_color=THEME["success"] if granted else THEME["warning"],
-                    size_hint_x=0.32,
-                )
-                title_lbl = MDLabel(
-                    text=ar(title),
-                    font_name=ARABIC_FONT,
-                    bold=True,
-                    font_size="14sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["text"],
-                    size_hint_x=0.68,
-                )
-                top.add_widget(status_lbl)
-                top.add_widget(title_lbl)
-
-                desc_lbl = MDLabel(
-                    text=ar(desc),
-                    font_name=ARABIC_FONT,
-                    font_size="12sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["muted"],
-                    size_hint_y=None,
-                    height=dp(36),
-                )
-                btn = MDRaisedButton(
-                    text=ar("مفعلة بالفعل" if granted else "تفعيل الصلاحية الآن"),
-                    font_name=ARABIC_FONT,
-                    md_bg_color=THEME["bg_secondary"] if granted else THEME["accent"],
-                    text_color=THEME["success"] if granted else THEME["bg_primary"],
-                    disabled=granted,
-                    size_hint_x=1,
-                    on_release=lambda x, cb=action: cb(),
-                )
-                card.add_widget(top)
-                card.add_widget(desc_lbl)
-                card.add_widget(btn)
-                container.add_widget(card)
-
             self.ids.btn_continue.disabled = not all_ok
-            if all_ok:
-                app = MDApp.get_running_app()
-                app.db.set_onboarding_complete(True)
+            if all_ok and not getattr(self, "_was_all_ok", False):
+                if not app.db.is_onboarding_complete():
+                    app.db.set_onboarding_complete(True)
                 app.sync_service_state()
+                Clock.schedule_once(lambda dt: app.start_background_service(), 0.2)
+            self._was_all_ok = all_ok
         except Exception:
             traceback.print_exc()
 
@@ -1051,43 +1679,42 @@ class OnboardingScreen(MDScreen):
 
 
 class DashboardScreen(MDScreen):
+    _rule_widgets: dict = {}
     _busy = False
+    _gen = 0
     _label_cache: dict[str, str] = {}
 
     def on_pre_enter(self, *args):
-        self.ids.dash_header.text = ar("لوحة التحكم")
-        self.ids.btn_add_rule.text = ar("+ قاعدة جديدة")
-        self.ids.rules_section_lbl.text = ar("القواعد النشطة")
-        self.refresh_dashboard(force=True)
-        if getattr(self, "_ev", None):
+        if getattr(self, "_ev", None) is not None:
             try:
                 self._ev.cancel()
             except Exception:
                 pass
-        self._ev = Clock.schedule_interval(lambda dt: self.refresh_dashboard(), 2.0)
+        self.ids.dash_header.text = ar("لوحة التحكم")
+        self.ids.btn_add_rule.text = ar("+ قاعدة جديدة")
+        self.refresh_dashboard(force=True)
+        self._ev = Clock.schedule_interval(lambda dt: self.refresh_dashboard(), 3.5)
 
     def on_pre_leave(self, *args):
-        if getattr(self, "_ev", None):
-            self._ev.cancel()
+        if getattr(self, "_ev", None) is not None:
+            try:
+                self._ev.cancel()
+            except Exception:
+                pass
             self._ev = None
 
-    @staticmethod
-    def _new_card():
-        """بطاقة بنفس شكل DarkCard في ملف KV لكن متاحة من بايثون."""
-        return MDCard(
+    def _new_card(self):
+        card = MDCard(
             md_bg_color=THEME["card"],
-            line_color=THEME.get("border", THEME["card"]),
+            line_color=THEME["border"],
             line_width=dp(1),
-            radius=[dp(22), dp(22), dp(22), dp(22)],
-            padding=dp(18),
-            spacing=dp(12),
+            radius=[dp(22)] * 4,
+            padding=dp(16),
+            spacing=dp(10),
             orientation="vertical",
             size_hint_y=None,
             height=dp(10),
         )
-
-    def _grow(self, card):
-        """اجعل البطاقة تأخذ ارتفاع محتواها بدل ارتفاع ثابت يسبب تراكب النصوص."""
         card.height = card.minimum_height
         card.bind(minimum_height=card.setter("height"))
         return card
@@ -1106,49 +1733,66 @@ class DashboardScreen(MDScreen):
     def refresh_dashboard(self, force: bool = False):
         """تحديث اللوحة دون تجميد الواجهة.
 
-        سابقاً كان استعلام UsageStats (ساعات من الأحداث) وPackageManager لكل
-        تطبيق مختار يجري على خيط الواجهة، فتتجمد الشاشة كلما زاد عدد
-        التطبيقات المختارة. الآن الحساب في خيط منفصل والعرض بعد وصوله.
+        كل ما يلمس Java أو UsageStats أو قاعدة البيانات يجري في خيط منفصل،
+        ولا نلمس أي ويدجت قبل العودة إلى خيط الواجهة.
         """
-        if self._busy and not force:
+        app = MDApp.get_running_app()
+        if app is None or getattr(app, "_paused", False):
+            return
+        if self._busy:
+            if force:
+                self._force_again = True
             return
         self._busy = True
-        app = MDApp.get_running_app()
-
-        lock_info = {}
-        try:
-            now_elapsed, now_wall = get_android_clocks()
-            lock_info = app.db.sync_monotonic_clock(now_elapsed, now_wall)
-        except Exception:
-            traceback.print_exc()
+        self._force_again = False
+        self._gen += 1
+        gen = self._gen
 
         def worker():
+            err = ""
+            evaluations, blocked_targets, usage = [], {}, {}
+            lock_info = {}
             try:
+                now_elapsed, now_wall = get_android_clocks()
+                lock_info = app.db.sync_monotonic_clock(now_elapsed, now_wall)
                 evaluations, blocked_targets, usage = app.tracker.evaluate_all_rules(app.db)
-                err = ""
             except Exception:
-                evaluations, blocked_targets, usage = [], {}, {}
                 err = traceback.format_exc()
                 print(f"[DASHBOARD] evaluate failed:\n{err}")
+            finally:
+                detach_current_thread()
             Clock.schedule_once(
                 lambda dt: self._apply(
-                    evaluations, blocked_targets, usage, err, lock_info, force
+                    gen, evaluations, blocked_targets, usage, err, lock_info
                 ),
                 0,
             )
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply(self, evaluations, blocked_targets, usage, err, lock_info, force_render=False):
+    def _apply(self, gen, evaluations, blocked_targets, usage, err, lock_info):
+        if gen != self._gen:
+            return
         self._busy = False
+        app = MDApp.get_running_app()
+        if app is not None and getattr(app, "_paused", False):
+            self._force_again = False
+            return
         try:
             app = MDApp.get_running_app()
             if lock_info:
                 self._render_lock(lock_info)
-            self.ids.btn_add_rule.disabled = False
+            self.ids.stat_rules.text = str(
+                sum(1 for ev in evaluations if ev["rule"]["enabled"])
+            )
+            self.ids.stat_blocked.text = str(len(blocked_targets))
+            self.ids.rules_section_lbl.text = ar(
+                f"القواعد النشطة · {len(evaluations)}"
+            )
 
-            # لا تُعد بناء البطاقات كل ثانيتين إن لم تتغير البيانات:
-            # إعادة بناء عشرات البطاقات دورياً كانت تسبب تقطعاً في التمرير.
+            # لا تُعد بناء البطاقات إن لم يتغير هيكل البيانات؛ أرقام التقدم
+            # فقط تُحدَّث داخل البطاقات القائمة (إعادة البناء كل 3.5 ثانية
+            # كانت تسبب تقطعاً واضحاً عند وجود عدة قواعد).
             state_key = lock_info.get("state") if lock_info else ""
             signature = (
                 state_key,
@@ -1156,17 +1800,22 @@ class DashboardScreen(MDScreen):
                 tuple(
                     (
                         ev["rule"]["id"],
+                        ev["rule"]["name"],
                         ev["rule"]["enabled"],
                         ev["is_unlocked"],
-                        int(ev["overall_progress"] * 100),
-                        round(float(ev["completed_minutes"]), 1),
+                        tuple(ev["rule"]["target_packages"]),
+                        tuple(ev["rule"]["source_packages"]),
+                        ev["rule"]["mode"],
+                        ev["rule"]["required_minutes"],
                     )
                     for ev in evaluations
                 ),
             )
-            if signature != getattr(self, "_rules_signature", None) or force_render:
+            if signature != getattr(self, "_rules_signature", None):
                 self._rules_signature = signature
                 self._render_rules(evaluations, err, usage)
+            else:
+                self._update_rule_progress(evaluations)
             try:
                 app.db.export_blocker_state(
                     app.state_json_path, list(blocked_targets.keys())
@@ -1175,150 +1824,149 @@ class DashboardScreen(MDScreen):
                 traceback.print_exc()
         except Exception:
             traceback.print_exc()
+        if getattr(self, "_force_again", False):
+            self._force_again = False
+            Clock.schedule_once(lambda dt: self.refresh_dashboard(), 0.1)
 
     def _render_lock(self, lock_info):
         state = lock_info["state"]
         rem = lock_info["remaining_seconds"]
+        timer = self.ids.lock_timer
+        btn = self.ids.btn_lock_action
 
         if state == LOCK_STATE_LOCKED:
             self.ids.lock_badge.text = ar("الحماية الصارمة مفعّلة")
             self.ids.lock_badge.text_color = THEME["warning"]
+            timer.opacity = 0
+            timer.height = 0
+            timer.text = ""
             self.ids.lock_desc.text = ar(
                 f"لا يمكن حذف القواعد أو تعديلها. لفتح نافذة تعديل {GR_LABEL} ابدأ عداد {CD_LABEL}."
             )
-            self.ids.btn_lock_action.text = ar(f"طلب فتح نافذة تعديل ({CD_LABEL})")
-            self.ids.btn_lock_action.md_bg_color = THEME["accent"]
+            btn.text = ar(f"طلب فتح نافذة تعديل ({CD_LABEL})")
+            btn.md_bg_color = THEME["accent"]
+            btn.text_color = THEME["bg_primary"]
         elif state == LOCK_STATE_WAITING_24H:
-            self.ids.lock_badge.text = ar(f"فك القفل بعد {format_hhmmss(rem)}")
+            self.ids.lock_badge.text = ar("بانتظار انتهاء العداد")
             self.ids.lock_badge.text_color = THEME["cyan"]
+            timer.opacity = 1
+            timer.height = dp(38)
+            timer.text = format_hhmmss(rem)
+            timer.text_color = THEME["cyan"]
             self.ids.lock_desc.text = ar(
                 f"القيود كلها مفعّلة حتى ينتهي العد، ثم تُفتح نافذة تعديل {GR_LABEL} فقط."
             )
-            self.ids.btn_lock_action.text = ar("إلغاء الطلب والعودة للقفل الفوري")
-            self.ids.btn_lock_action.md_bg_color = THEME["danger"]
+            btn.text = ar("إلغاء الطلب والعودة للقفل الفوري")
+            btn.md_bg_color = THEME["danger"]
+            btn.text_color = THEME["text"]
         else:
-            self.ids.lock_badge.text = ar(f"نافذة التعديل مفتوحة {format_hhmmss(rem)}")
+            self.ids.lock_badge.text = ar("نافذة التعديل مفتوحة")
             self.ids.lock_badge.text_color = THEME["success"]
+            timer.opacity = 1
+            timer.height = dp(38)
+            timer.text = format_hhmmss(rem)
+            timer.text_color = THEME["success"]
             self.ids.lock_desc.text = ar(
                 "يمكنك الآن تعديل القواعد أو حذفها قبل انتهاء المهلة."
             )
-            self.ids.btn_lock_action.text = ar("إعادة القفل الصارم الآن")
-            self.ids.btn_lock_action.md_bg_color = THEME["cyan"]
+            btn.text = ar("إعادة القفل الصارم الآن")
+            btn.md_bg_color = THEME["cyan"]
+            btn.text_color = THEME["bg_primary"]
 
     def _render_rules(self, evaluations, err, usage):
         container = self.ids.rules_container
         container.clear_widgets()
+        self._rule_widgets = {}
 
         try:
             if not PermissionBridge.all_granted():
                 warn = self._new_card()
+                head = MDBoxLayout(size_hint_y=None, height=dp(38), spacing=dp(10))
+                head.add_widget(_icon_badge("alert-outline", "warning", 38))
+                head.add_widget(_rtl_label("الحماية غير مكتملة", "14sp", "warning", True, 22))
+                warn.add_widget(head)
                 warn.add_widget(
-                    MDLabel(
-                        text=ar("الحماية غير مكتملة: صلاحية ناقصة"),
-                        font_name=ARABIC_FONT,
-                        bold=True,
-                        font_size="14sp",
-                        halign="right",
-                        theme_text_color="Custom",
-                        text_color=THEME["warning"],
-                        size_hint_y=None,
-                        height=dp(26),
+                    _wrap_label(
+                        "بدون صلاحية الاستخدام + الظهور فوق التطبيقات + خدمة الوصول "
+                        "لن يعمل المنع فعلياً. اضغط الزر لإكمالها.",
+                        "12sp",
+                        "muted",
                     )
                 )
                 warn.add_widget(
-                    MDLabel(
-                        text=ar(
-                            "بدون صلاحية الاستخدام + الظهور فوق التطبيقات + خدمة الوصول "
-                            "لن يعمل المنع فعلياً. اضغط الزر لإكمالها."
-                        ),
-                        font_name=ARABIC_FONT,
-                        font_size="12sp",
-                        halign="right",
-                        theme_text_color="Custom",
-                        text_color=THEME["muted"],
-                        size_hint_y=None,
-                        height=dp(58),
+                    _rounded_button(
+                        "إكمال الصلاحيات",
+                        "warning",
+                        "bg_primary",
+                        lambda: MDApp.get_running_app().go_screen("onboarding"),
+                        42,
+                        "12.5sp",
+                        True,
                     )
                 )
-                warn.add_widget(
-                    MDRaisedButton(
-                        text=ar("إكمال الصلاحيات"),
-                        font_name=ARABIC_FONT,
-                        md_bg_color=THEME["warning"],
-                        text_color=THEME["bg_primary"],
-                        size_hint_x=1,
-                        on_release=lambda x: MDApp.get_running_app().go_screen("onboarding"),
-                    )
-                )
-                container.add_widget(self._grow(warn))
+                container.add_widget(warn)
         except Exception:
             traceback.print_exc()
 
         if err:
             card = self._new_card()
-            card.add_widget(
-                MDLabel(
-                    text=ar("تعذر حساب القواعد. تفاصيل الخطأ:"),
-                    font_name=ARABIC_FONT,
-                    bold=True,
-                    font_size="13sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["danger"],
-                    size_hint_y=None,
-                    height=dp(24),
-                )
-            )
-            card.add_widget(
-                MDLabel(
-                    text=err[-600:],
-                    font_name=ARABIC_FONT,
-                    font_size="10sp",
-                    halign="left",
-                    theme_text_color="Custom",
-                    text_color=THEME["muted"],
-                    size_hint_y=None,
-                    height=dp(180),
-                )
-            )
-            container.add_widget(self._grow(card))
+            card.add_widget(_rtl_label("تعذر حساب القواعد", "14sp", "danger", True, 22))
+            details = _wrap_label(err[-600:], "9.5sp", "muted")
+            details.halign = "left"
+            card.add_widget(details)
+            container.add_widget(card)
             return
 
         if not evaluations:
             card = self._new_card()
+            badge_row = MDBoxLayout(size_hint_y=None, height=dp(54), spacing=0)
+            badge_row.add_widget(MDBoxLayout())
+            badge_row.add_widget(_icon_badge("shield-plus-outline", "accent", 52))
+            badge_row.add_widget(MDBoxLayout())
+            card.add_widget(badge_row)
+            title = _rtl_label("لا توجد قواعد بعد", "16sp", "text", True, 26)
+            title.halign = "center"
+            card.add_widget(title)
+            desc = _wrap_label(
+                "أضف أول قاعدة: اختر التطبيقات التي تريد حظرها، والتطبيقات "
+                "التي يجب استخدامها أولاً، ثم عدد الدقائق المطلوبة.",
+                "12sp",
+                "muted",
+            )
+            desc.halign = "center"
+            card.add_widget(desc)
             card.add_widget(
-                MDLabel(
-                    text=ar("لا توجد قواعد بعد"),
-                    font_name=ARABIC_FONT,
-                    bold=True,
-                    font_size="16sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["text"],
-                    size_hint_y=None,
-                    height=dp(30),
+                _rounded_button(
+                    "+ إنشاء قاعدة الآن",
+                    "accent",
+                    "bg_primary",
+                    lambda: self.open_new_rule(),
+                    44,
+                    "13sp",
+                    True,
                 )
             )
-            card.add_widget(
-                MDLabel(
-                    text=ar(
-                        "اضغط (+ قاعدة جديدة): اختر التطبيقات التي تريد حظرها، "
-                        "والتطبيقات التي يجب استخدامها أولاً، ثم عدد الدقائق المطلوبة."
-                    ),
-                    font_name=ARABIC_FONT,
-                    font_size="12sp",
-                    halign="right",
-                    theme_text_color="Custom",
-                    text_color=THEME["muted"],
-                    size_hint_y=None,
-                    height=dp(70),
-                )
-            )
-            container.add_widget(self._grow(card))
+            container.add_widget(card)
             return
 
         for ev in evaluations:
             container.add_widget(self._rule_card(ev, usage))
+
+    def _update_rule_progress(self, evaluations):
+        for ev in evaluations:
+            refs = self._rule_widgets.get(ev["rule"]["id"])
+            if not refs:
+                continue
+            try:
+                done = float(ev["completed_minutes"])
+                need = float(ev["required_minutes"])
+                prog = float(ev["overall_progress"])
+                refs["stat"].text = ar(
+                    f"{done:.1f} من {need:.0f} دقيقة اليوم · {int(prog * 100)}%"
+                )
+                refs["pbar"].value = int(prog * 100)
+            except Exception:
+                traceback.print_exc()
 
     def _rule_card(self, ev, usage):
         rule = ev["rule"]
@@ -1326,123 +1974,85 @@ class DashboardScreen(MDScreen):
         prog = float(ev["overall_progress"])
         mode_ar = "تجميعي SUM" if rule["mode"] == "SUM" else "فردي INDIVIDUAL"
         can_mod = MDApp.get_running_app().db.can_modify_restrictions()
+        tone = "success" if is_unlocked else "danger"
 
         card = self._new_card()
-        card.orientation = "vertical"
 
-        top = MDBoxLayout(size_hint_y=None, height=dp(32), spacing=dp(10))
-        chip = MDCard(
-            md_bg_color=THEME["success"] if is_unlocked else THEME["danger"],
-            radius=[dp(14), dp(14), dp(14), dp(14)],
-            padding=0,
-            size_hint=(None, None),
-            size=(dp(74), dp(26)),
-            pos_hint={"center_y": 0.5},
-        )
-        chip.add_widget(
-            MDLabel(
-                text=ar("مفتوح" if is_unlocked else "محظور"),
-                font_name=ARABIC_FONT,
-                bold=True,
-                font_size="11sp",
-                halign="center",
-                theme_text_color="Custom",
-                text_color=get_color_from_hex("#07101E"),
-            )
-        )
-        top.add_widget(chip)
+        top = MDBoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10))
         top.add_widget(
-            MDLabel(
-                text=ar(rule["name"]),
-                font_name=ARABIC_FONT,
-                bold=True,
-                font_size="17sp",
-                halign="right",
-                theme_text_color="Custom",
-                text_color=THEME["text"],
-                size_hint_y=None,
-                height=dp(30),
-                text_size=(self.width, None),
+            _icon_badge(
+                "shield-check-outline" if is_unlocked else "shield-alert-outline",
+                tone,
+                40,
             )
         )
+        name_col = MDBoxLayout(orientation="vertical", spacing=dp(1))
+        name_col.add_widget(_rtl_label(_shorten(rule["name"], 22), "15sp", "text", True, 22))
+        name_col.add_widget(
+            _rtl_label(
+                f"{'مفتوح الآن' if is_unlocked else 'محظور الآن'} · {mode_ar}",
+                "10.5sp",
+                tone,
+                False,
+                16,
+            )
+        )
+        top.add_widget(name_col)
+        top.add_widget(_chip("مفتوح" if is_unlocked else "محظور", tone, 76, 26, "11sp"))
 
         tgt = ", ".join(self._label(p) for p in rule["target_packages"][:3])
         extra = len(rule["target_packages"]) - 3
         more = f" +{extra}" if extra > 0 else ""
         src = ", ".join(self._label(p) for p in rule["source_packages"][:3])
-        meta = MDLabel(
-            text=ar(f"المحظور: {tgt}{more}\nالأولوية: {src} · {mode_ar}"),
-            font_name=ARABIC_FONT,
-            font_size="12sp",
-            halign="right",
-            theme_text_color="Custom",
-            text_color=THEME["muted"],
-            size_hint_y=None,
-            height=dp(46),
+        meta = _wrap_label(
+            ar(f"المحظور: {tgt}{more}\nالأولوية: {src}"),
+            "11.5sp",
+            "muted",
         )
 
         done = float(ev["completed_minutes"])
         need = float(ev["required_minutes"])
-        stat = MDBoxLayout(size_hint_y=None, height=dp(28), spacing=dp(6))
-        stat.add_widget(
-            MDLabel(
-                text=ar(f"{done:.1f}"),
-                font_name=ARABIC_FONT,
-                bold=True,
-                font_size="19sp",
-                halign="left",
-                theme_text_color="Custom",
-                text_color=THEME["accent_soft"],
-                size_hint_x=0.28,
-            )
+        stat = _wrap_label(
+            f"{done:.1f} من {need:.0f} دقيقة اليوم · {int(prog * 100)}%",
+            "12sp",
+            "accent_soft" if not is_unlocked else "success",
+            True,
         )
-        stat.add_widget(
-            MDLabel(
-                text=ar(f"من {need:.0f} دقيقة مطلوبة اليوم"),
-                font_name=ARABIC_FONT,
-                font_size="12sp",
-                halign="right",
-                theme_text_color="Custom",
-                text_color=THEME["muted"],
-                size_hint_x=0.72,
-            )
-        )
-
         pbar = MDProgressBar(
             value=int(prog * 100),
             color=THEME["success"] if is_unlocked else THEME["accent"],
             size_hint_y=None,
-            height=dp(10),
+            height=dp(8),
         )
 
-        actions = MDBoxLayout(size_hint_y=None, height=dp(44), spacing=dp(10))
+        actions = MDBoxLayout(size_hint_y=None, height=dp(44), spacing=dp(8))
         if can_mod:
             actions.add_widget(
-                MDRaisedButton(
-                    text=ar("تعديل القاعدة"),
-                    font_name=ARABIC_FONT,
-                    font_size="12sp",
-                    md_bg_color=THEME["card_hover"],
-                    text_color=THEME["accent_soft"],
-                    on_release=lambda x, rid=rule["id"]: self.open_edit_rule(rid),
+                _rounded_button(
+                    "تعديل",
+                    "card_hover",
+                    "accent_soft",
+                    (lambda rid=rule["id"]: self.open_edit_rule(rid)),
+                    38,
+                    "11.5sp",
+                    True,
+                    96,
                 )
             )
         else:
             actions.add_widget(
-                MDLabel(
-                    text=ar(f"التعديل يتطلب نافذة {GR_LABEL}"),
-                    font_name=ARABIC_FONT,
-                    font_size="11sp",
-                    halign="right",
-                    valign="middle",
-                    theme_text_color="Custom",
-                    text_color=THEME["muted"],
+                _wrap_label(
+                    f"التعديل يتطلب نافذة {GR_LABEL}",
+                    "10.5sp",
+                    "muted",
                 )
             )
-        # KivyMD 1.2.0: تمرير active إلى MDSwitch في المُنشئ يرفع
-        # AttributeError لأن on_active ينفذ قبل إنشاء ids.thumb، فيتوقف
-        # بناء كل بطاقات القواعد وتظهر اللوحة فارغة. لذلك نضبطها بعد الإنشاء.
-        sw = MDSwitch()
+        actions.add_widget(MDBoxLayout())
+        sw = MDSwitch(
+            size_hint=(None, None),
+            size=(dp(44), dp(36)),
+            pos_hint={"center_y": 0.5},
+        )
         sw.disabled = not can_mod
         sw.active = bool(rule["enabled"])
         sw.bind(active=lambda inst, val, rid=rule["id"]: self.on_toggle_rule(rid, val))
@@ -1453,7 +2063,8 @@ class DashboardScreen(MDScreen):
         card.add_widget(stat)
         card.add_widget(pbar)
         card.add_widget(actions)
-        return self._grow(card)
+        self._rule_widgets[rule["id"]] = {"stat": stat, "pbar": pbar}
+        return card
 
     def on_lock_action(self):
         app = MDApp.get_running_app()
@@ -1466,17 +2077,17 @@ class DashboardScreen(MDScreen):
             app.db.cancel_unlock_request()
             notify_snack("تم تفعيل القفل الصارم فوراً.")
         app.sync_service_state()
-        self.refresh_dashboard()
+        self.refresh_dashboard(force=True)
 
     def on_toggle_rule(self, rule_id: int, val: bool):
         app = MDApp.get_running_app()
         if not app.db.can_modify_restrictions():
             notify_snack("لا يمكن تعطيل القواعد أثناء القفل الصارم.")
-            self.refresh_dashboard()
+            self.refresh_dashboard(force=True)
             return
         app.db.toggle_rule(rule_id, val)
         app.sync_service_state()
-        self.refresh_dashboard()
+        self.refresh_dashboard(force=True)
 
     def open_new_rule(self):
         # إضافة قاعدة جديدة مسموحة دائماً: التشديد لا يخالف الحماية الصارمة،
@@ -1506,6 +2117,8 @@ class RuleBuilderScreen(MDScreen):
 
     def on_pre_leave(self, *args):
         # لا تترك نافذة الاختيار مفتوحة إذا غادر المستخدم الشاشة
+        _PICKER_STATE["on_toggle"] = None
+        self._picker_active = False
         try:
             if self.picker_dialog is not None:
                 self.picker_dialog.dismiss()
@@ -1522,31 +2135,46 @@ class RuleBuilderScreen(MDScreen):
         return self._label_cache[pkg]
 
     def on_pre_enter(self, *args):
-        self.ids.lbl_rule_name.text = ar("اسم القاعدة")
-        self.ids.lbl_target_sec.text = ar("التطبيقات المحظورة (Target Apps)")
+        self.ids.lbl_target_sec.text = ar("التطبيقات المحظورة")
         self.ids.btn_pick_targets.text = ar("اختيار التطبيقات المحظورة")
-        self.ids.lbl_source_sec.text = ar("تطبيقات الشرط / المصدر (Source Apps)")
+        self.ids.lbl_source_sec.text = ar("تطبيقات المصدر")
         self.ids.btn_pick_sources.text = ar("اختيار تطبيقات المصدر")
-        self.ids.lbl_minutes.text = ar("الوقت المطلوب بالدقائق (بالضبط)")
         self.ids.btn_save_rule.text = ar("حفظ وتفعيل القاعدة")
         self.ids.btn_delete_rule.text = ar("حذف هذه القاعدة")
         self._update_mode_texts(self.ids.switch_mode.active)
         self._preload_apps()
 
     def _preload_apps(self):
+        """تسخين قائمة التطبيقات من النسخة المخزنة دون تجميد الواجهة."""
         app = MDApp.get_running_app()
+        if getattr(self, "_preload_running", False):
+            return
+        self._preload_running = True
+
         def _worker():
             try:
-                self._installed_apps = app.tracker.get_installed_apps()
+                apps = app.tracker.get_installed_apps()
+                if apps:
+                    self._installed_apps = apps
+                # تحديث القائمة من PackageManager في الخلفية (مرة واحدة لكل فتح).
+                if not getattr(self, "_apps_refreshed", False):
+                    fresh = app.tracker.get_installed_apps(force_refresh=True)
+                    if fresh:
+                        self._installed_apps = fresh
+                        self._apps_refreshed = True
             except Exception:
-                pass
+                traceback.print_exc()
+            finally:
+                self._preload_running = False
+                detach_current_thread()
+
         threading.Thread(target=_worker, daemon=True).start()
 
     def load_rule(self, rule_id: int | None):
         app = MDApp.get_running_app()
         self.editing_rule_id = rule_id
         if rule_id is None:
-            self.ids.rb_title.text = ar("إنشاء قاعدة حظر جديدة")
+            self.ids.rb_title.text = ar("إنشاء قاعدة جديدة")
             self.ids.input_rule_name.text = ""
             self.selected_targets = []
             self.selected_sources = []
@@ -1558,7 +2186,7 @@ class RuleBuilderScreen(MDScreen):
             rule = app.db.get_rule(rule_id)
             if not rule:
                 return
-            self.ids.rb_title.text = ar("تعديل قاعدة الحظر")
+            self.ids.rb_title.text = ar("تعديل القاعدة")
             self.ids.input_rule_name.text = rule["name"]
             self.selected_targets = list(rule["target_packages"])
             self.selected_sources = list(rule["source_packages"])
@@ -1570,17 +2198,26 @@ class RuleBuilderScreen(MDScreen):
         self._refresh_summaries()
         self._update_mode_texts(self.ids.switch_mode.active)
 
+    def _summary_text(self, packages) -> str:
+        names = [self._label(p) for p in packages]
+        shown = "، ".join(names[:4])
+        extra = len(names) - 4
+        if extra > 0:
+            shown += f" +{extra}"
+        return shown
+
     def _refresh_summaries(self):
-        app = MDApp.get_running_app()
         if self.selected_targets:
-            t_txt = ", ".join(self._label(p) for p in self.selected_targets)
-            self.ids.lbl_target_summary.text = ar(f"المختار ({len(self.selected_targets)}): {t_txt}")
+            self.ids.lbl_target_summary.text = ar(
+                f"المحدد ({len(self.selected_targets)}): {self._summary_text(self.selected_targets)}"
+            )
         else:
             self.ids.lbl_target_summary.text = ar("لم يتم اختيار أي تطبيق محظور بعد.")
 
         if self.selected_sources:
-            s_txt = ", ".join(self._label(p) for p in self.selected_sources)
-            self.ids.lbl_source_summary.text = ar(f"المختار ({len(self.selected_sources)}): {s_txt}")
+            self.ids.lbl_source_summary.text = ar(
+                f"المحدد ({len(self.selected_sources)}): {self._summary_text(self.selected_sources)}"
+            )
         else:
             self.ids.lbl_source_summary.text = ar("لم يتم اختيار أي تطبيق مصدر بعد.")
 
@@ -1589,22 +2226,22 @@ class RuleBuilderScreen(MDScreen):
 
     def _update_mode_texts(self, is_individual: bool):
         if is_individual:
-            self.ids.lbl_mode_title.text = ar("النمط الفردي الإلزامي (INDIVIDUAL / AND)")
+            self.ids.lbl_mode_title.text = ar("فردي إلزامي (INDIVIDUAL)")
             self.ids.lbl_mode_desc.text = ar(
                 "تُفتح التطبيقات المحظورة فقط بعد إتمام الدقائق المطلوبة في كل تطبيق مصدر على حدة."
             )
         else:
-            self.ids.lbl_mode_title.text = ar("النمط التجميعي (SUM / OR)")
+            self.ids.lbl_mode_title.text = ar("تجميعي (SUM)")
             self.ids.lbl_mode_desc.text = ar(
                 "تُفتح التطبيقات المحظورة بمجرد وصول مجموع دقائق تطبيقات المصدر مجتمعة إلى الرقم المحدد."
             )
 
     def open_app_picker(self, role: str):
-        """نافذة اختيار التطبيقات — لا تجمّد الواجهة ولا تفشل بصمت.
+        """نافذة اختيار التطبيقات عبر RecycleView: صفوف مرئية فقط بلا تجميد.
 
-        سابقاً كانت تجلب قائمة التطبيقات على خيط الواجهة (تجميد عدة ثوانٍ ثم
-        عودة بلا نتيجة إن فشل شيء)، وكانت تبني مئات الصفوف دفعة واحدة.
-        الآن: الجلب في خيط منفصل، والرسم على دفعات 12 صفاً لكل إطار.
+        - القائمة تُقرأ من كاش على القرص أولاً ثم تُحدّث في الخلفية.
+        - الصفوف تُنشأ وتُعاد استخدامها تلقائياً (بدل بناء مئات الويدجت).
+        - الأيقونات تُستخرج فقط للتطبيقات الظاهرة.
         """
         app = MDApp.get_running_app()
         temp_selected = set(
@@ -1614,10 +2251,11 @@ class RuleBuilderScreen(MDScreen):
         status_lbl = MDLabel(
             text=ar("جارٍ تحميل قائمة التطبيقات..."),
             font_name=ARABIC_FONT,
-            font_size="12sp",
+            font_size="11.5sp",
             halign="right",
+            text_size=(None, None),
             size_hint_y=None,
-            height=dp(26),
+            height=dp(24),
             theme_text_color="Custom",
             text_color=THEME["muted"],
         )
@@ -1626,157 +2264,187 @@ class RuleBuilderScreen(MDScreen):
             font_name=ARABIC_FONT,
             mode="rectangle",
             size_hint_y=None,
-            height=dp(48),
+            height=dp(52),
         )
-        scroll = ScrollView()
-        list_box = MDBoxLayout(orientation="vertical", spacing=dp(6), size_hint_y=None)
-        list_box.bind(minimum_height=list_box.setter("height"))
-        scroll.add_widget(list_box)
+
+        rv = RecycleView(size_hint=(1, 1))
+        layout = RecycleBoxLayout(
+            default_size=(None, dp(62)),
+            default_size_hint=(1, None),
+            size_hint_y=None,
+            orientation="vertical",
+            spacing=dp(4),
+        )
+        layout.bind(minimum_height=layout.setter("height"))
+        rv.add_widget(layout)
+        rv.viewclass = "AppPickRow"
+
+        btn_all = MDFlatButton(
+            text=ar("تحديد الكل"),
+            font_name=ARABIC_FONT,
+            font_size="10sp",
+            theme_text_color="Custom",
+            text_color=THEME["accent_soft"],
+            size_hint=(None, None),
+            size=(dp(84), dp(28)),
+        )
+        btn_clear = MDFlatButton(
+            text=ar("مسح التحديد"),
+            font_name=ARABIC_FONT,
+            font_size="10sp",
+            theme_text_color="Custom",
+            text_color=THEME["muted"],
+            size_hint=(None, None),
+            size=(dp(88), dp(28)),
+        )
+        btn_refresh = MDFlatButton(
+            text=ar("تحديث"),
+            font_name=ARABIC_FONT,
+            font_size="10sp",
+            theme_text_color="Custom",
+            text_color=THEME["cyan"],
+            size_hint=(None, None),
+            size=(dp(58), dp(28)),
+        )
+        tools = MDBoxLayout(size_hint_y=None, height=dp(28), spacing=dp(4))
+        tools.add_widget(btn_all)
+        tools.add_widget(btn_clear)
+        tools.add_widget(btn_refresh)
+        tools.add_widget(MDBoxLayout())
 
         content = MDBoxLayout(
             orientation="vertical",
             spacing=dp(8),
             size_hint_y=None,
-            height=dp(430),
+            height=min(dp(540), max(dp(330), Window.height - dp(260))),
         )
+        content.add_widget(_rtl_label("اختر التطبيقات", "17sp", "text", True, 28))
         content.add_widget(search_field)
         content.add_widget(status_lbl)
-        content.add_widget(scroll)
+        content.add_widget(tools)
+        content.add_widget(rv)
 
-        state = {"apps": [], "query": "", "gen": 0, "matched": [], "index": 0}
+        state = {"apps": [], "query": "", "data": [], "data_map": {}}
+        self._picker_active = True
 
-        def build_row(item):
-            pkg = item["package_name"]
-
-            def _on_active(inst, val, p=item["package_name"]):
-                if val:
-                    temp_selected.add(p)
-                else:
-                    temp_selected.discard(p)
-                status_lbl.text = ar(f"المحدد: {len(temp_selected)}")
-
-            row = MDBoxLayout(
-                orientation="horizontal",
-                size_hint_y=None,
-                height=dp(58),
-                spacing=dp(10),
-                padding=[dp(6), 0],
-            )
-            cb = MDCheckbox(
-                active=pkg in temp_selected,
-                size_hint=(None, None),
-                size=(dp(34), dp(34)),
-                pos_hint={"center_y": 0.5},
-            )
-            cb.bind(active=_on_active)
-            row.add_widget(cb)
-
-            text = (
-                f"[b][color={THEME_HEX['text']}]{ar(item['name'])}[/color][/b]\n"
-                f"[color={THEME_HEX['muted']}]{pkg}[/color]"
-            )
-            row.add_widget(
-                MDLabel(
-                    text=text,
-                    markup=True,
-                    font_name=ARABIC_FONT,
-                    font_size="13sp",
-                    halign="right",
-                    valign="middle",
-                    theme_text_color="Custom",
-                    text_color=THEME["text"],
-                )
-            )
-
-            icon_path = item.get("icon_path") or ""
-            if icon_path and os.path.exists(icon_path):
-                row.add_widget(
-                    Image(
-                        source=icon_path,
-                        size_hint=(None, None),
-                        size=(dp(30), dp(30)),
-                        pos_hint={"center_y": 0.5},
-                    )
-                )
-            return row
-
-        def render_more(gen, *_args):
-            if gen != state["gen"]:
-                return
-            matched = state["matched"]
-            end = min(state["index"] + 20, len(matched))
-            for item in matched[state["index"]:end]:
-                list_box.add_widget(build_row(item))
-            state["index"] = end
+        def update_status():
+            shown = len(state["data"])
             status_lbl.text = ar(
-                f"المعروض {end} من {len(matched)} — المحدد: {len(temp_selected)}"
+                f"{shown} معروض · المحدد {len(temp_selected)}"
             )
-            if end < len(matched):
-                Clock.schedule_once(lambda dt: render_more(gen), 0)
 
-        def start_render():
-            state["gen"] += 1
-            gen = state["gen"]
-            state["index"] = 0
-            query = state["query"]
-            state["matched"] = [
-                item
-                for item in state["apps"]
-                if not query
-                or query in item["name"].lower()
-                or query in item["package_name"].lower()
-            ]
-            list_box.clear_widgets()
-            if not state["matched"]:
-                status_lbl.text = ar("لا توجد نتائج مطابقة.")
+        def refresh_list():
+            if not self._picker_active:
                 return
-            Clock.schedule_once(lambda dt: render_more(gen), 0)
+            query = state["query"]
+            items = []
+            for item in state["apps"]:
+                name = item.get("name") or item.get("package_name") or ""
+                pkg = item["package_name"]
+                if query and query not in name.casefold() and query not in pkg.casefold():
+                    continue
+                items.append(
+                    {
+                        "pkg": pkg,
+                        "app_name": ar(name),
+                        "selected": pkg in temp_selected,
+                        "icon_path": "",
+                    }
+                )
+            state["data"] = items
+            state["data_map"] = {d["pkg"]: d for d in items}
+            rv.data = items
+            update_status()
+
+        def on_toggle(pkg: str, active: bool):
+            if active:
+                temp_selected.add(pkg)
+            else:
+                temp_selected.discard(pkg)
+            # حدّث نسخة الصف داخل RecycleView نفسها حتى تبقى الحالة صحيحة
+            # عند إعادة استخدام الصفوف أثناء التمرير.
+            entry = state["data_map"].get(pkg)
+            if entry is not None:
+                entry["selected"] = active
+            for item in rv.data:
+                if item.get("pkg") == pkg:
+                    item["selected"] = active
+                    break
+            update_status()
+
+        def select_all(*args):
+            for entry in state["data"]:
+                temp_selected.add(entry["pkg"])
+                entry["selected"] = True
+            rv.refresh_from_data()
+            update_status()
+
+        def clear_all(*args):
+            for entry in state["data"]:
+                temp_selected.discard(entry["pkg"])
+                entry["selected"] = False
+            rv.refresh_from_data()
+            update_status()
+
+        btn_all.bind(on_release=select_all)
+        btn_clear.bind(on_release=clear_all)
+        _PICKER_STATE["on_toggle"] = on_toggle
 
         def apply_apps(apps):
+            if not self._picker_active:
+                return
             state["apps"] = list(apps or [])
             if state["apps"]:
-                status_lbl.text = ar(f"عدد التطبيقات: {len(state['apps'])}")
-                start_render()
+                refresh_list()
             else:
                 status_lbl.text = ar(
-                    "تعذر جلب التطبيقات. تأكد من صلاحية الاستخدام (Usage Access) ثم أعد المحاولة."
-                )
-                list_box.clear_widgets()
-                list_box.add_widget(
-                    MDRaisedButton(
-                        text=ar("إعادة المحاولة"),
-                        font_name=ARABIC_FONT,
-                        md_bg_color=THEME["accent"],
-                        text_color=THEME["bg_primary"],
-                        size_hint_y=None,
-                        height=dp(46),
-                        on_release=lambda x: load_apps(force=True),
-                    )
+                    "تعذر جلب التطبيقات. تأكد من صلاحية الاستخدام ثم أعد المحاولة."
                 )
 
         def load_apps(force: bool = False):
-            if self._installed_apps and not force:
+            if self._installed_apps:
                 apply_apps(self._installed_apps)
-                return
-            status_lbl.text = ar("جارٍ تحميل قائمة التطبيقات...")
+            status_lbl.text = ar("جارٍ تحديث قائمة التطبيقات...")
 
             def worker():
                 try:
-                    apps = app.tracker.get_installed_apps(force_refresh=True)
-                    self._installed_apps = apps
+                    apps = app.tracker.get_installed_apps(force_refresh=force)
+                    if apps:
+                        self._installed_apps = apps
                 except Exception:
                     traceback.print_exc()
                     apps = []
-                Clock.schedule_once(lambda dt: apply_apps(apps), 0)
+                finally:
+                    detach_current_thread()
+                if apps:
+                    Clock.schedule_once(lambda dt: apply_apps(apps), 0)
+                elif not self._installed_apps:
+                    Clock.schedule_once(
+                        lambda dt: apply_apps([]),
+                        0,
+                    )
 
             threading.Thread(target=worker, daemon=True).start()
 
         def on_search(inst, txt):
-            state["query"] = (txt or "").strip().lower()
-            if state["apps"]:
-                start_render()
+            state["query"] = (txt or "").strip().casefold()
+            pending = getattr(self, "_search_ev", None)
+            if pending is not None:
+                try:
+                    pending.cancel()
+                except Exception:
+                    pass
+            self._search_ev = Clock.schedule_once(lambda dt: refresh_list(), 0.2)
 
         search_field.bind(text=on_search)
+        btn_refresh.bind(on_release=lambda *a: load_apps(True))
+
+        def close_picker(*args):
+            _PICKER_STATE["on_toggle"] = None
+            self._picker_active = False
+            if self.picker_dialog is not None:
+                self.picker_dialog.dismiss()
+                self.picker_dialog = None
 
         def on_confirm(*args):
             if role == "target":
@@ -1784,12 +2452,11 @@ class RuleBuilderScreen(MDScreen):
             else:
                 self.selected_sources = sorted(temp_selected)
             self._refresh_summaries()
-            if self.picker_dialog:
-                self.picker_dialog.dismiss()
+            close_picker()
 
         try:
             self.picker_dialog = MDDialog(
-                title=ar("اختر التطبيقات"),
+                title="",
                 type="custom",
                 md_bg_color=THEME["card"],
                 content_cls=content,
@@ -1799,11 +2466,12 @@ class RuleBuilderScreen(MDScreen):
                         font_name=ARABIC_FONT,
                         theme_text_color="Custom",
                         text_color=THEME["muted"],
-                        on_release=lambda x: self.picker_dialog.dismiss(),
+                        on_release=close_picker,
                     ),
-                    MDRaisedButton(
+                    MDFillRoundFlatButton(
                         text=ar("تأكيد الاختيار"),
                         font_name=ARABIC_FONT,
+                        font_size="12.5sp",
                         md_bg_color=THEME["accent"],
                         text_color=THEME["bg_primary"],
                         on_release=on_confirm,
@@ -1813,6 +2481,8 @@ class RuleBuilderScreen(MDScreen):
             self.picker_dialog.open()
         except Exception:
             traceback.print_exc()
+            _PICKER_STATE["on_toggle"] = None
+            self._picker_active = False
             notify_snack("تعذر فتح نافذة اختيار التطبيقات.")
             return
 
@@ -1881,54 +2551,107 @@ class SettingsScreen(MDScreen):
     time_dialog = None
 
     def on_pre_enter(self, *args):
-        self.ids.settings_title.text = ar("الإعدادات والتصفير اليومي")
-        self.ids.lbl_reset_title.text = ar("وقت التصفير اليومي المخصص (Daily Reset)")
+        if getattr(self, "_ev", None) is not None:
+            try:
+                self._ev.cancel()
+            except Exception:
+                pass
+        self.ids.settings_title.text = ar("الإعدادات")
+        self.ids.lbl_reset_title.text = ar("التصفير اليومي")
         self.ids.btn_pick_reset_time.text = ar("تغيير وقت التصفير اليومي")
-        self.ids.lbl_strict_title.text = ar(f"إدارة الحماية الصارمة ({CD_LABEL} -> {GR_LABEL})")
-        self.ids.lbl_perms_link.text = ar("فحص صلاحيات النظام")
+        self.ids.lbl_strict_title.text = ar(f"الحماية الصارمة ({CD_LABEL} ← {GR_LABEL})")
+        self.ids.lbl_perms_link.text = ar("صلاحيات النظام")
         self.ids.btn_recheck_perms.text = ar("مراجعة شاشة الصلاحيات")
-        self.ids.lbl_tamper_title.text = ar("سجل محاولات التلاعب بالوقت")
+        self.ids.lbl_tamper_title.text = ar("سجل محاولات التلاعب")
         self.refresh_settings()
         self._ev = Clock.schedule_interval(lambda dt: self.refresh_settings(), 2.5)
 
     def on_pre_leave(self, *args):
-        if hasattr(self, "_ev") and self._ev:
-            self._ev.cancel()
+        if getattr(self, "_ev", None) is not None:
+            try:
+                self._ev.cancel()
+            except Exception:
+                pass
+            self._ev = None
 
     def refresh_settings(self):
-        try:
-            app = MDApp.get_running_app()
-            h, m = app.db.get_reset_time()
-            self.ids.lbl_reset_val.text = ar(
-                f"يتم تصفير عدادات الاستخدام وإعادة القفل يومياً الساعة {h:02d}:{m:02d}"
-            )
-            can_mod = app.db.can_modify_restrictions()
-            self.ids.btn_pick_reset_time.disabled = not can_mod
+        """قراءة قاعدة البيانات وحساب القفل في خيط منفصل، ثم تحديث الواجهة."""
+        app = MDApp.get_running_app()
+        if app is None or getattr(app, "_paused", False):
+            return
+        if getattr(self, "_busy", False):
+            return
+        self._busy = True
 
-            now_elapsed, now_wall = get_android_clocks()
-            lock_info = app.db.sync_monotonic_clock(now_elapsed, now_wall)
+        def worker():
+            data = {}
+            err = None
+            try:
+                data["reset"] = app.db.get_reset_time()
+                data["can_mod"] = app.db.can_modify_restrictions()
+                now_elapsed, now_wall = get_android_clocks()
+                data["lock"] = app.db.sync_monotonic_clock(now_elapsed, now_wall)
+                data["logs"] = app.db.get_tamper_logs(limit=6)
+            except Exception:
+                err = traceback.format_exc()
+                print(f"[SETTINGS] refresh failed:\n{err}")
+            finally:
+                detach_current_thread()
+            Clock.schedule_once(lambda dt: self._apply_settings(data), 0)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_settings(self, data):
+        self._busy = False
+        app = MDApp.get_running_app()
+        if app is not None and getattr(app, "_paused", False):
+            return
+        try:
+            if not data:
+                return
+            h, m = data["reset"]
+            self.ids.lbl_reset_val.text = ar(
+                f"يتم تصفير العدادات وإعادة القفل يومياً الساعة {h:02d}:{m:02d}"
+            )
+            self.ids.btn_pick_reset_time.disabled = not data["can_mod"]
+
+            lock_info = data["lock"]
             state = lock_info["state"]
             rem = lock_info["remaining_seconds"]
+            btn = self.ids.btn_strict_unlock
 
             if state == LOCK_STATE_LOCKED:
                 self.ids.lbl_strict_status.text = ar(
-                    f"النظام مقفل حالياً. لفتح نافذة الـ {GR_LABEL} المسموح فيها بالتعديل أو إلغاء مشرف الجهاز وحذف التطبيق، ابدأ عداد الـ {CD_LABEL}."
+                    f"التعديل والحذف مقفلان الآن. ابدأ عداد {CD_LABEL} لفتح نافذة "
+                    f"تعديل {GR_LABEL}، أو استخدم زر الرجوع للخروج."
                 )
-                self.ids.btn_strict_unlock.text = ar(f"بدء عداد {CD_LABEL} لفك القفل")
+                btn.text = ar(f"بدء عداد {CD_LABEL} لفك القفل")
+                btn.md_bg_color = THEME["warning"]
+                btn.text_color = THEME["bg_primary"]
             elif state == LOCK_STATE_WAITING_24H:
-                self.ids.lbl_strict_status.text = ar(f"جاري العد التنازلي: متبقي {format_hhmmss(rem)}")
-                self.ids.btn_strict_unlock.text = ar("إلغاء طلب فك القفل")
+                self.ids.lbl_strict_status.text = ar(
+                    f"العد التنازلي جارٍ: متبقي {format_hhmmss(rem)}"
+                )
+                btn.text = ar("إلغاء طلب فك القفل")
+                btn.md_bg_color = THEME["danger"]
+                btn.text_color = THEME["text"]
             else:
-                self.ids.lbl_strict_status.text = ar(f"نافذة التعديل والحذف مفتوحة الآن! متبقي {format_hhmmss(rem)}")
-                self.ids.btn_strict_unlock.text = ar("إغلاق النافذة وإعادة القفل فوراً")
+                self.ids.lbl_strict_status.text = ar(
+                    f"نافذة التعديل مفتوحة الآن · متبقي {format_hhmmss(rem)}"
+                )
+                btn.text = ar("إغلاق النافذة وإعادة القفل فوراً")
+                btn.md_bg_color = THEME["cyan"]
+                btn.text_color = THEME["bg_primary"]
 
-            logs = app.db.get_tamper_logs(limit=6)
+            logs = data["logs"]
             if not logs:
                 self.ids.lbl_tamper_logs.text = ar("لا توجد محاولات تلاعب مسجلة.")
             else:
                 lines = []
                 for lg in logs:
-                    dt_str = datetime.fromtimestamp(lg["timestamp_ms"] / 1000.0).strftime("%Y-%m-%d %H:%M")
+                    dt_str = datetime.fromtimestamp(lg["timestamp_ms"] / 1000.0).strftime(
+                        "%Y-%m-%d %H:%M"
+                    )
                     lines.append(f"[{dt_str}] {ar(lg['details'])}")
                 self.ids.lbl_tamper_logs.text = "\n".join(lines)
         except Exception:
@@ -1990,9 +2713,10 @@ class SettingsScreen(MDScreen):
                     text_color=THEME["muted"],
                     on_release=lambda *a: self.time_dialog.dismiss(),
                 ),
-                MDRaisedButton(
+                MDFillRoundFlatButton(
                     text=ar("حفظ"),
                     font_name=ARABIC_FONT,
+                    font_size="12.5sp",
                     md_bg_color=THEME["accent"],
                     text_color=THEME["bg_primary"],
                     on_release=_save,
@@ -2023,7 +2747,9 @@ class CondBlockerApp(MDApp):
 
     def build(self):
         try:
+            self.title = "Motiv_Force"
             self.theme_cls.theme_style = "Dark"
+            self.theme_cls.material_style = "M2"
             self.theme_cls.primary_palette = "Orange"
 
             if ARABIC_FONT != "Roboto":
@@ -2032,7 +2758,10 @@ class CondBlockerApp(MDApp):
                         style_cfg[0] = ARABIC_FONT
 
             if IS_ANDROID:
-                files_dir = str(PythonActivity.mActivity.getFilesDir().getAbsolutePath())
+                try:
+                    files_dir = str(PythonActivity.mActivity.getFilesDir().getAbsolutePath())
+                except Exception:
+                    files_dir = os.environ.get("ANDROID_PRIVATE") or os.path.expanduser("~")
             else:
                 files_dir = os.path.join(os.path.expanduser("~"), ".motiv_force")
 
@@ -2041,6 +2770,7 @@ class CondBlockerApp(MDApp):
             self.state_json_path = os.path.join(files_dir, "blocker_state.json")
             self.tracker = UsageTracker(cache_dir=files_dir)
 
+            Factory.register("AppPickRow", cls=AppPickRow)
             Builder.load_string(KV)
             sm = MDScreenManager()
             sm.add_widget(OnboardingScreen(name="onboarding"))
@@ -2055,6 +2785,7 @@ class CondBlockerApp(MDApp):
                 sm.current = "onboarding"
 
             self.sync_service_state()
+            Clock.schedule_once(lambda dt: self._warm_app_list(), 2.5)
             return sm
         except Exception:
             err_txt = traceback.format_exc()
@@ -2076,7 +2807,14 @@ class CondBlockerApp(MDApp):
             err_scr.add_widget(sv)
             return err_scr
 
+    def ar(self, text):
+        return ar(text)
+
     def on_start(self):
+        try:
+            Window.softinput_mode = "below_target"
+        except Exception:
+            pass
         Window.bind(on_keyboard=self._on_back_button)
         if IS_ANDROID:
             try:
@@ -2101,11 +2839,54 @@ class CondBlockerApp(MDApp):
             self.root.current = name
 
     def sync_service_state(self):
-        try:
-            _, blocked_targets, _ = self.tracker.evaluate_all_rules(self.db)
-            self.db.export_blocker_state(self.state_json_path, list(blocked_targets.keys()))
-        except Exception:
-            pass
+        """حساب القواعد وكتابة ملف الحالة المشترك في خلفية، بعيداً عن الواجهة.
+
+        هذا الاستدعاء كان ينفذ استعلام UsageStats كاملاً على خيط الواجهة عند
+        العودة من شاشة الصلاحيات، فتتجمد الواجهة ثم يُغلق التطبيق.
+        """
+        if self.db is None or self.tracker is None:
+            return
+        if getattr(self, "_sync_busy", False):
+            self._sync_pending = True
+            return
+        self._sync_busy = True
+        self._sync_pending = False
+        db = self.db
+        tracker = self.tracker
+        state_path = self.state_json_path
+
+        def worker():
+            try:
+                _, blocked_targets, _ = tracker.evaluate_all_rules(db)
+                db.export_blocker_state(state_path, list(blocked_targets.keys()))
+            except Exception:
+                traceback.print_exc()
+            finally:
+                detach_current_thread()
+                Clock.schedule_once(lambda dt: self._finish_sync(), 0)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_sync(self):
+        self._sync_busy = False
+        if getattr(self, "_sync_pending", False):
+            self._sync_pending = False
+            self.sync_service_state()
+
+    def _warm_app_list(self):
+        """تحديث كاش أسماء التطبيقات في الخلفية استعداداً لشاشة الاختيار."""
+        if not IS_ANDROID or self.tracker is None:
+            return
+
+        def worker():
+            try:
+                self.tracker.get_installed_apps(force_refresh=True)
+            except Exception:
+                traceback.print_exc()
+            finally:
+                detach_current_thread()
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_pause(self):
         # أوقف مؤقتات التحديث قبل أن يفقد أندرويد سياق OpenGL، حتى لا تُعاد
@@ -2116,15 +2897,29 @@ class CondBlockerApp(MDApp):
 
     def on_resume(self):
         self._paused = False
+        # لا نعيد بناء الواجهة أو نلمس OpenGL أثناء استئناف النشاط مباشرة:
+        # ننتظر حتى يكتمل استئناف النافذة ثم نحدّث بهدوء.
         try:
-            if IS_ANDROID and self.db:
+            if getattr(self, "_resume_ev", None) is not None:
+                self._resume_ev.cancel()
+        except Exception:
+            pass
+        self._resume_ev = Clock.schedule_once(self._post_resume, 0.7)
+
+    def _post_resume(self, dt):
+        if self._paused:
+            return
+        try:
+            if IS_ANDROID and self.db is not None:
                 self.sync_service_state()
-                if self.root and hasattr(self.root, "current"):
+                if self.root and getattr(self.root, "current", None):
                     curr = self.root.get_screen(self.root.current)
                     if hasattr(curr, "refresh_permissions"):
                         curr.refresh_permissions(force=True)
                     elif hasattr(curr, "refresh_dashboard"):
-                        curr.refresh_dashboard()
+                        curr.refresh_dashboard(force=True)
+                    elif hasattr(curr, "refresh_settings"):
+                        curr.refresh_settings()
                 if self.db.is_onboarding_complete():
                     self.start_background_service()
         except Exception:
@@ -2150,9 +2945,9 @@ class CondBlockerApp(MDApp):
             if getattr(screen, "_ev", None) is not None:
                 return
             for name, interval in (
-                ("refresh_dashboard", 2.5),
+                ("refresh_dashboard", 3.5),
                 ("refresh_settings", 2.5),
-                ("refresh_permissions", 1.5),
+                ("refresh_permissions", 2.0),
             ):
                 fn = getattr(screen, name, None)
                 if callable(fn):
@@ -2165,6 +2960,10 @@ class CondBlockerApp(MDApp):
     def start_background_service(self):
         if not IS_ANDROID:
             return
+        now = time.monotonic()
+        if now - getattr(self, "_service_started_at", 0.0) < 4.0:
+            return
+        self._service_started_at = now
         try:
             act = PythonActivity.mActivity
             pkg = str(act.getPackageName())
@@ -2189,6 +2988,11 @@ def _write_crash_log(tb_text: str):
     try:
         base = os.environ.get("ANDROID_PRIVATE") or os.path.dirname(os.path.abspath(__file__))
         path = os.path.join(base, "crash_log.txt")
+        try:
+            if os.path.exists(path) and os.path.getsize(path) > 256 * 1024:
+                os.remove(path)
+        except Exception:
+            pass
         with open(path, "a", encoding="utf-8") as f:
             f.write(f"\n===== {datetime.now().isoformat()} =====\n{tb_text}\n")
         print(f"[CRASH] written to {path}")
@@ -2196,7 +3000,40 @@ def _write_crash_log(tb_text: str):
         pass
 
 
+def _install_exception_guard():
+    """يمنع أي خطأ غير متوقع في ويدجت واحد من إغلاق التطبيق بالكامل.
+
+    Kivy افتراضياً يتعامل مع أي استثناء داخل Clock أو اللمس بإيقاف التطبيق.
+    هنا نسجّل الخطأ (لتشخيصه لاحقاً في crash_log.txt) ونسمح للتطبيق بالاستمرار،
+    مع حد أقصى حتى لا ندخل في حلقة أخطاء لا نهائية.
+    """
+    try:
+        from kivy.base import ExceptionHandler, ExceptionManager
+
+        class _KeepAliveHandler(ExceptionHandler):
+            def __init__(self):
+                super().__init__()
+                self._times = []
+
+            def handle_exception(self, inst):
+                now = time.monotonic()
+                self._times = [t for t in self._times if now - t < 10.0]
+                self._times.append(now)
+                tb = traceback.format_exc()
+                print(f"[UNCAUGHT] {tb}")
+                _write_crash_log(tb)
+                if len(self._times) > 40:
+                    return ExceptionManager.RAISE
+                return ExceptionManager.PASS
+
+        ExceptionManager.add_handler(_KeepAliveHandler())
+        print("[SAFETY] keep-alive exception handler installed")
+    except Exception:
+        traceback.print_exc()
+
+
 if __name__ == "__main__":
+    _install_exception_guard()
     try:
         CondBlockerApp().run()
     except BaseException:

@@ -1,4 +1,6 @@
+import json
 import os
+import threading
 import time
 
 IS_ANDROID = "ANDROID_ARGUMENT" in os.environ
@@ -44,13 +46,39 @@ def get_android_clocks() -> tuple[int, int]:
     return int(time.monotonic() * 1000), now_ms
 
 
+def detach_current_thread():
+    """يحرر خيط بايثون من JVM بعد انتهاء العمل في الخلفية.
+
+    pyjnius يربط الخيط بالـ JVM عند أول استدعاء Java ولا يفك الارتباط تلقائياً،
+    فتراكم الخيوط المرتبطة كان يسبب كراشات متقطعة بعد كل تحديث في الواجهة.
+    """
+    if not IS_ANDROID:
+        return
+    try:
+        from jnius import detach
+
+        detach()
+    except Exception:
+        pass
+
+
 class UsageTracker:
     def __init__(self, context=None, cache_dir: str = "."):
         self.context = context
         self.cache_dir = cache_dir
         self._app_cache: dict[str, dict] = {}
-        self.icons_dir = os.path.join(cache_dir, "app_icons")
-        os.makedirs(self.icons_dir, exist_ok=True)
+        self._icons_dir = os.path.join(cache_dir, "app_icons")
+        os.makedirs(self._icons_dir, exist_ok=True)
+        self._apps_json = os.path.join(cache_dir, "installed_apps.json")
+        self._lock = threading.RLock()
+        self._query_lock = threading.Lock()
+        self._icons: dict[str, str] = {}
+        self._usage_memo = None  # (cycle_id, packages_key, ts, usage_copy)
+        self._fg_memo = (0.0, "")
+
+    @property
+    def icons_dir(self) -> str:
+        return self._icons_dir
 
     def _get_context(self):
         if self.context is not None:
@@ -70,73 +98,165 @@ class UsageTracker:
                 pass
         return None
 
+    def _sorted_apps(self) -> list[dict]:
+        return sorted(
+            self._app_cache.values(),
+            key=lambda x: (x.get("name") or "").casefold(),
+        )
+
+    def _load_apps_cache(self) -> dict[str, dict]:
+        try:
+            with open(self._apps_json, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            apps: dict[str, dict] = {}
+            for item in raw:
+                pkg = str(item.get("package_name") or "")
+                if not pkg:
+                    continue
+                apps[pkg] = {
+                    "name": str(item.get("name") or pkg),
+                    "package_name": pkg,
+                    "icon_path": "",
+                }
+            return apps
+        except Exception:
+            return {}
+
+    def _store_apps_cache(self, apps: dict[str, dict]):
+        try:
+            tmp = self._apps_json + ".tmp"
+            payload = [
+                {"name": a["name"], "package_name": a["package_name"]}
+                for a in apps.values()
+            ]
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            os.replace(tmp, self._apps_json)
+        except Exception:
+            pass
+
     def get_installed_apps(self, force_refresh: bool = False) -> list[dict]:
         """
-        يجلب قائمة التطبيقات المثبتة القابلة للتشغيل مع الاسم والحزمة ومسار الأيقونة.
+        يجلب قائمة التطبيقات المثبتة القابلة للتشغيل.
+
+        - عند أول فتح يقرأ نسخة مخزنة على القرص (فتح فوري بدون تجميد).
+        - التحديث الكامل من PackageManager يجري في خيط منفصل فقط.
+        - لا نستخرج الأيقونات هنا: تُستخرج عند عرض الصف فقط (Lazy).
         """
-        if self._app_cache and not force_refresh:
-            return sorted(self._app_cache.values(), key=lambda x: x["name"].lower())
+        with self._lock:
+            if self._app_cache and not force_refresh:
+                return self._sorted_apps()
+            if not force_refresh:
+                cached = self._load_apps_cache()
+                if cached:
+                    self._app_cache = cached
+                    return self._sorted_apps()
 
         ctx = self._get_context()
         if not IS_ANDROID or ctx is None:
             return []
 
+        # استعلام واحد فقط في نفس الوقت. إذا كان هناك استعلام جارٍ (تسخين
+        # بدأ عند فتح التطبيق مثلاً) ننتظره ثم نستخدم نتيجته بدل إرجاع قائمة فارغة.
+        if not self._query_lock.acquire(blocking=False):
+            with self._query_lock:
+                with self._lock:
+                    if self._app_cache:
+                        return self._sorted_apps()
+            if not self._query_lock.acquire(blocking=False):
+                with self._lock:
+                    return self._sorted_apps()
+        try:
+            apps = self._query_installed_apps(ctx)
+            if apps:
+                with self._lock:
+                    self._app_cache = apps
+                self._store_apps_cache(apps)
+        finally:
+            self._query_lock.release()
+
+        with self._lock:
+            return self._sorted_apps()
+
+    def _query_installed_apps(self, ctx) -> dict[str, dict]:
         pm = ctx.getPackageManager()
         my_pkg = str(ctx.getPackageName())
         launch_intent = Intent(Intent.ACTION_MAIN, None)
         launch_intent.addCategory(Intent.CATEGORY_LAUNCHER)
 
         resolve_infos = pm.queryIntentActivities(launch_intent, 0)
-        apps_map = {}
-
+        apps_map: dict[str, dict] = {}
         size = resolve_infos.size()
         for i in range(size):
-            ri = resolve_infos.get(i)
-            act_info = ri.activityInfo
-            pkg = str(act_info.packageName)
-            if pkg == my_pkg or pkg in apps_map:
-                continue
-
             try:
-                label = str(ri.loadLabel(pm))
-            except Exception:
-                label = pkg
-
-            icon_path = os.path.join(self.icons_dir, f"{pkg}.png")
-            if not os.path.exists(icon_path):
+                ri = resolve_infos.get(i)
+                act_info = ri.activityInfo
+                pkg = str(act_info.packageName)
+                if pkg == my_pkg or pkg in apps_map:
+                    continue
                 try:
-                    drawable = ri.loadIcon(pm)
-                    self._save_drawable_to_png(drawable, icon_path)
+                    label = str(ri.loadLabel(pm))
                 except Exception:
-                    icon_path = ""
-
-            apps_map[pkg] = {
-                "name": label,
-                "package_name": pkg,
-                "icon_path": icon_path if os.path.exists(icon_path) else "",
-            }
-
-        self._app_cache = apps_map
-        return sorted(apps_map.values(), key=lambda x: x["name"].lower())
+                    label = pkg
+                apps_map[pkg] = {
+                    "name": label,
+                    "package_name": pkg,
+                    "icon_path": "",
+                }
+            except Exception:
+                continue
+        return apps_map
 
     def get_app_label(self, pkg: str) -> str:
-        if pkg in self._app_cache:
-            return self._app_cache[pkg]["name"]
+        with self._lock:
+            cached = self._app_cache.get(pkg)
+        if cached and cached.get("name"):
+            return cached["name"]
         ctx = self._get_context()
         if IS_ANDROID and ctx is not None:
             try:
                 pm = ctx.getPackageManager()
                 app_info = pm.getApplicationInfo(pkg, 0)
                 label = str(pm.getApplicationLabel(app_info))
-                self._app_cache[pkg] = {
-                    "name": label,
-                    "package_name": pkg,
-                    "icon_path": os.path.join(self.icons_dir, f"{pkg}.png"),
-                }
+                with self._lock:
+                    self._app_cache[pkg] = {
+                        "name": label,
+                        "package_name": pkg,
+                        "icon_path": "",
+                    }
                 return label
             except Exception:
                 pass
         return pkg
+
+    def get_app_icon_path(self, pkg: str) -> str:
+        """يستخرج أيقونة تطبيق واحد فقط عند الحاجة (Lazy) ويخزنها على القرص."""
+        if not pkg:
+            return ""
+        with self._lock:
+            cached = self._icons.get(pkg)
+        if cached and os.path.exists(cached):
+            return cached
+
+        path = os.path.join(self._icons_dir, f"{pkg}.png")
+        if os.path.exists(path):
+            with self._lock:
+                self._icons[pkg] = path
+            return path
+
+        ctx = self._get_context()
+        if not IS_ANDROID or ctx is None:
+            return ""
+        try:
+            drawable = ctx.getPackageManager().getApplicationIcon(pkg)
+            self._save_drawable_to_png(drawable, path)
+            if os.path.exists(path):
+                with self._lock:
+                    self._icons[pkg] = path
+                return path
+        except Exception:
+            pass
+        return ""
 
     def _save_drawable_to_png(self, drawable, out_path: str):
         width = drawable.getIntrinsicWidth()
@@ -158,9 +278,13 @@ class UsageTracker:
         """
         يرجع اسم الحزمة المفتوحة حالياً في الواجهة عبر آخر أحداث UsageStatsManager.
         """
+        now_mono = time.monotonic()
+        if now_mono - self._fg_memo[0] < 1.0:
+            return self._fg_memo[1]
         ctx = self._get_context()
         if not IS_ANDROID or ctx is None:
             return ""
+        result = ""
         try:
             usm = ctx.getSystemService(Context.USAGE_STATS_SERVICE)
             if usm is None:
@@ -180,9 +304,11 @@ class UsageTracker:
                     if ts >= last_ts:
                         last_ts = ts
                         last_pkg = str(ev.getPackageName())
-            return last_pkg
+            result = last_pkg
         except Exception:
-            return ""
+            result = ""
+        self._fg_memo = (now_mono, result)
+        return result
 
     def get_usage_seconds_since_reset(self, db, packages_of_interest: set[str] | None = None) -> dict[str, float]:
         """
@@ -195,6 +321,19 @@ class UsageTracker:
         wall_offset = lock_state["wall_offset_ms"]
 
         cycle_start_trusted, cycle_id = db.get_current_reset_window(trusted_wall)
+
+        pkgs_key = None
+        if packages_of_interest is not None:
+            pkgs_key = tuple(sorted(packages_of_interest))
+        memo = self._usage_memo
+        if (
+            memo is not None
+            and memo[0] == cycle_id
+            and memo[1] == pkgs_key
+            and time.monotonic() - memo[2] < 1.5
+        ):
+            return dict(memo[3])
+
         cached_usage = db.get_cached_usage(cycle_id)
 
         ctx = self._get_context()
@@ -265,6 +404,7 @@ class UsageTracker:
         if merged:
             db.update_cached_usage(cycle_id, merged)
 
+        self._usage_memo = (cycle_id, pkgs_key, time.monotonic(), dict(merged))
         return merged
 
     def evaluate_all_rules(self, db) -> tuple[list[dict], dict[str, dict], dict[str, float]]:
@@ -275,12 +415,19 @@ class UsageTracker:
         3) قاموس ثواني الاستخدام لجميع التطبيقات ذات الصلة.
         """
         rules = db.get_all_rules()
+        if not rules:
+            return [], {}, {}
+
         needed_pkgs: set[str] = set()
         for r in rules:
             if r["enabled"]:
                 needed_pkgs.update(r["source_packages"])
 
-        usage_sec = self.get_usage_seconds_since_reset(db, needed_pkgs if needed_pkgs else None)
+        # لا توجد قاعدة نشطة => لا حاجة لقراءة أحداث الاستخدام إطلاقاً.
+        # (سابقاً كان يُمرَّر None فيقرأ النظام استخدام كل التطبيقات لساعات).
+        usage_sec = (
+            self.get_usage_seconds_since_reset(db, needed_pkgs) if needed_pkgs else {}
+        )
 
         evaluations = []
         blocked_targets: dict[str, dict] = {}

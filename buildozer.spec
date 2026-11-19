@@ -8,6 +8,9 @@ source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,xml,java,json,ttf
 version = 2.0
 
+icon.filename = %(source.dir)s/assets/icon.png
+presplash.filename = %(source.dir)s/assets/presplash.png
+
 requirements = python3,sqlite3,kivy==2.3.0,kivymd==1.2.0,arabic-reshaper,python-bidi==0.4.2,pillow,pyjnius
 orientation = portrait
 fullscreen = 0

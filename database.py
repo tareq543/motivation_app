@@ -530,19 +530,20 @@ class CondBlockerDB:
         """
         كتابة ملف حالة مشترك (Atomic Write) لتقرأه خدمات Java (AccessibilityService & DeviceAdmin) فوراً.
         """
-        lock_info = self.get_lock_state()
-        payload = {
-            "lock_state": lock_info["state"],
-            "remaining_seconds": lock_info["remaining_seconds"],
-            "onboarding_complete": self.is_onboarding_complete(),
-            "blocked_packages": blocked_packages,
-            "updated_at": int(time.time() * 1000),
-        }
-        tmp_path = state_file_path + ".tmp"
-        try:
-            os.makedirs(os.path.dirname(state_file_path), exist_ok=True)
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
-            os.replace(tmp_path, state_file_path)
-        except Exception:
-            pass
+        with self._lock:
+            lock_info = self.get_lock_state()
+            payload = {
+                "lock_state": lock_info["state"],
+                "remaining_seconds": lock_info["remaining_seconds"],
+                "onboarding_complete": self.is_onboarding_complete(),
+                "blocked_packages": blocked_packages,
+                "updated_at": int(time.time() * 1000),
+            }
+            tmp_path = state_file_path + ".tmp"
+            try:
+                os.makedirs(os.path.dirname(state_file_path) or ".", exist_ok=True)
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False)
+                os.replace(tmp_path, state_file_path)
+            except Exception:
+                pass

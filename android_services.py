@@ -77,9 +77,10 @@ if IS_ANDROID:
         __javainterfaces__ = ["java/lang/Runnable"]
         __javacontext__ = "app"
 
-        def __init__(self, fn):
+        def __init__(self, fn, owner=None):
             super().__init__()
             self.fn = fn
+            self.owner = owner
 
         @java_method("()V")
         def run(self):
@@ -87,6 +88,14 @@ if IS_ANDROID:
                 self.fn()
             except Exception:
                 traceback.print_exc()
+            finally:
+                # نحرر المرجع بعد التنفيذ حتى لا يتراكم، مع إبقائه حياً
+                # حتى ينفذه Java (وإلا يجمعه GC وينهار التطبيق).
+                if self.owner is not None:
+                    try:
+                        self.owner._pending_runnables.remove(self)
+                    except Exception:
+                        pass
 
 
 class BlockingOverlayManager:
@@ -102,10 +111,19 @@ class BlockingOverlayManager:
         self.main_handler = Handler(Looper.getMainLooper()) if IS_ANDROID else None
         self.overlay_view = None
         self.current_blocked_pkg = ""
+        self._removing = False
         self._listeners = []
         self._progress_bars = {}
         self._progress_labels = {}
         self._last_render_ts = 0.0
+        self._pending_runnables = []
+
+    def _post(self, fn):
+        if self.main_handler is None:
+            return
+        proxy = RunnableProxy(fn, self)
+        self._pending_runnables.append(proxy)
+        self.main_handler.post(proxy)
 
     def _dp(self, dp: int) -> int:
         density = self.ctx.getResources().getDisplayMetrics().density
@@ -281,7 +299,7 @@ class BlockingOverlayManager:
             self.wm.addView(root, params)
             self.overlay_view = root
 
-        self.main_handler.post(RunnableProxy(_build_and_attach))
+        self._post(_build_and_attach)
 
     def _update_progress_in_ui(self, eval_item: dict):
         def _update():
@@ -296,29 +314,32 @@ class BlockingOverlayManager:
                         f"المنجز: {item['used_minutes']:.1f} دقيقة / المطلوب: {item['required_minutes']} دقيقة"
                     )
 
-        self.main_handler.post(RunnableProxy(_update))
+        self._post(_update)
 
     def hide(self):
-        if not IS_ANDROID or self.overlay_view is None:
+        if not IS_ANDROID or self.overlay_view is None or self._removing:
             self.current_blocked_pkg = ""
             return
         self.current_blocked_pkg = ""
+        # لا نكرر طلب الإزالة كل دورة (كل 0.8 ثانية) بينما هو في طريقه للتنفيذ.
+        self._removing = True
+        view = self.overlay_view
+        self._post(lambda: self._remove_view_sync(view))
 
-        def _do_remove():
-            self._remove_view_sync()
-
-        self.main_handler.post(RunnableProxy(_do_remove))
-
-    def _remove_view_sync(self):
-        if self.overlay_view is not None:
+    def _remove_view_sync(self, view=None):
+        if view is None:
+            view = self.overlay_view
+        self._removing = False
+        if view is not None:
             try:
-                self.wm.removeViewImmediate(self.overlay_view)
+                self.wm.removeViewImmediate(view)
             except Exception:
                 try:
-                    self.wm.removeView(self.overlay_view)
+                    self.wm.removeView(view)
                 except Exception:
                     pass
-            self.overlay_view = None
+            if self.overlay_view is view:
+                self.overlay_view = None
 
     def _launch_source_app(self, pkg: str):
         try:
@@ -440,15 +461,25 @@ def run_monitor_service():
 
     my_pkg = str(service.getPackageName())
     last_notif_update = 0.0
+    last_eval = -999.0
+    blocked_targets: dict[str, dict] = {}
+    lock_info = {"state": LOCK_STATE_LOCKED, "remaining_seconds": 0.0}
+    EVAL_INTERVAL = 4.0
 
     try:
         while True:
             try:
-                now_elapsed, now_wall = get_android_clocks()
-                lock_info = db.sync_monotonic_clock(now_elapsed, now_wall)
+                now_mono = time.monotonic()
 
-                evaluations, blocked_targets, _ = tracker.evaluate_all_rules(db)
-                db.export_blocker_state(state_json_path, list(blocked_targets.keys()))
+                # تقييم الاستخدام ليس رخيصاً (قراءة أحداث UsageStats)، لذلك
+                # ننفذه كل 4 ثوانٍ بدل كل نصف ثانية حتى لا تستنزف الخدمة
+                # المعالج وتسبب تقطعاً في واجهة التطبيق.
+                if now_mono - last_eval >= EVAL_INTERVAL:
+                    last_eval = now_mono
+                    now_elapsed, now_wall = get_android_clocks()
+                    lock_info = db.sync_monotonic_clock(now_elapsed, now_wall)
+                    evaluations, blocked_targets, _ = tracker.evaluate_all_rules(db)
+                    db.export_blocker_state(state_json_path, list(blocked_targets.keys()))
 
                 # قراءة التطبيق المفتوح (أولوية لملف Accessibility الفوري، ثم UsageStatsManager)
                 fg_pkg = _read_accessibility_fg_pkg(files_dir)
@@ -460,9 +491,8 @@ def run_monitor_service():
                 else:
                     overlay_mgr.hide()
 
-                # تحديث إشعار الخدمة الخلفية كل 5 ثوانٍ
-                now_mono = time.monotonic()
-                if now_mono - last_notif_update >= 5.0:
+                # تحديث إشعار الخدمة الخلفية كل 10 ثوانٍ
+                if now_mono - last_notif_update >= 10.0:
                     last_notif_update = now_mono
                     state = lock_info["state"]
                     if state == LOCK_STATE_WAITING_24H:
@@ -480,7 +510,7 @@ def run_monitor_service():
             except Exception:
                 traceback.print_exc()
 
-            time.sleep(0.5)
+            time.sleep(0.8)
     finally:
         try:
             overlay_mgr.hide()
