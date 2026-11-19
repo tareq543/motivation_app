@@ -349,7 +349,7 @@ def _create_notification(service, title: str, text: str):
     if BuildVersion.SDK_INT >= 26:
         channel = NotificationChannel(
             CHANNEL_ID,
-            "خدمة مراقبة Motivator",
+            "خدمة مراقبة Motiv_Force",
             NotificationManager.IMPORTANCE_LOW,
         )
         nm.createNotificationChannel(channel)
@@ -396,7 +396,7 @@ def run_monitor_service():
         pass
 
     files_dir = str(service.getFilesDir().getAbsolutePath())
-    db_path = os.path.join(files_dir, "motivator.db")
+    db_path = os.path.join(files_dir, "motiv_force.db")
     state_json_path = os.path.join(files_dir, "blocker_state.json")
 
     db = CondBlockerDB(db_path)
@@ -431,7 +431,7 @@ def run_monitor_service():
     try:
         pm = service.getSystemService(Context.POWER_SERVICE)
         wake_lock = pm.newWakeLock(
-            PowerManager.PARTIAL_WAKE_LOCK, "Motivator::MonitorWakeLock"
+            PowerManager.PARTIAL_WAKE_LOCK, "Motiv_Force::MonitorWakeLock"
         )
         wake_lock.acquire()
     except Exception:

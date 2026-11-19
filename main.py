@@ -841,7 +841,7 @@ class PermissionBridge:
             dpm = act.getSystemService(Context.DEVICE_POLICY_SERVICE)
             comp = ComponentName(
                 act.getPackageName(),
-                "com.tareq.motivator.AppDeviceAdminReceiver",
+                "com.tareq.motiv_force.AppDeviceAdminReceiver",
             )
             return bool(dpm.isAdminActive(comp))
         except Exception:
@@ -903,7 +903,7 @@ class PermissionBridge:
             act = PythonActivity.mActivity
             comp = ComponentName(
                 act.getPackageName(),
-                "com.tareq.motivator.AppDeviceAdminReceiver",
+                "com.tareq.motiv_force.AppDeviceAdminReceiver",
             )
             intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
             intent.putExtra(
@@ -2034,10 +2034,10 @@ class CondBlockerApp(MDApp):
             if IS_ANDROID:
                 files_dir = str(PythonActivity.mActivity.getFilesDir().getAbsolutePath())
             else:
-                files_dir = os.path.join(os.path.expanduser("~"), ".motivator")
+                files_dir = os.path.join(os.path.expanduser("~"), ".motiv_force")
 
             os.makedirs(files_dir, exist_ok=True)
-            self.db = CondBlockerDB(os.path.join(files_dir, "motivator.db"))
+            self.db = CondBlockerDB(os.path.join(files_dir, "motiv_force.db"))
             self.state_json_path = os.path.join(files_dir, "blocker_state.json")
             self.tracker = UsageTracker(cache_dir=files_dir)
 
