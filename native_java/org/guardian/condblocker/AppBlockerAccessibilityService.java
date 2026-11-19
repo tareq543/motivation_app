@@ -1,4 +1,4 @@
-package com.tareq.motivator;
+package com.tareq.motiv_force;
 
 import android.accessibilityservice.AccessibilityService;
 import android.view.accessibility.AccessibilityEvent;
@@ -78,7 +78,7 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
 
     private boolean containsDangerousKeywords(AccessibilityNodeInfo root, String myPkg) {
         String[] appIdentifiers = new String[]{
-                "Motivator", "الحظر المشروط", myPkg
+                "Motiv_Force", "الحظر المشروط", myPkg
         };
         boolean mentionsOurApp = false;
         for (String id : appIdentifiers) {

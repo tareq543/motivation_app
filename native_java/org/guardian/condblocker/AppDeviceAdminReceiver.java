@@ -1,4 +1,4 @@
-package com.tareq.motivator;
+package com.tareq.motiv_force;
 
 import android.app.admin.DeviceAdminReceiver;
 import android.content.Context;
