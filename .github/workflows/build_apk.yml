@@ -1,4 +1,4 @@
-name: Build Motiv_Force APK
+name: Build Motiv_Forcer APK
 
 on:
   workflow_dispatch:
@@ -195,10 +195,10 @@ jobs:
           fi
 
           for APK in bin/*.apk; do
-            "${AAPT2[0]}" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/motiv_force-manifest.txt
+            "${AAPT2[0]}" dump xmltree --file AndroidManifest.xml "$APK" > /tmp/motiv_forcer-manifest.txt
 
             for ITEM in AppBlockerAccessibilityService foregroundServiceType BootReceiver; do
-              grep -qF "$ITEM" /tmp/motiv_force-manifest.txt || {
+              grep -qF "$ITEM" /tmp/motiv_forcer-manifest.txt || {
                 echo "::error::$ITEM missing from AndroidManifest.xml"
                 exit 1
               }
@@ -233,6 +233,6 @@ jobs:
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: motiv_force-debug-apk
+          name: motiv_forcer-debug-apk
           path: bin/*.apk
           if-no-files-found: error
