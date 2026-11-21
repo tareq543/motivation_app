@@ -1,7 +1,7 @@
 [app]
 
-title = Motiv_Force
-package.name = motiv_force
+title = Motiv_Forcer
+package.name = motiv_forcer
 package.domain = com.tareq
 
 source.dir = .

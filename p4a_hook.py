@@ -6,7 +6,7 @@ import shutil
 
 MANIFEST_INJECTION = """
     <service
-        android:name="com.tareq.motiv_force.AppBlockerAccessibilityService"
+        android:name="com.tareq.motiv_forcer.AppBlockerAccessibilityService"
         android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
         android:exported="true">
         <intent-filter>
@@ -18,7 +18,7 @@ MANIFEST_INJECTION = """
     </service>
 
     <receiver
-        android:name="com.tareq.motiv_force.AppDeviceAdminReceiver"
+        android:name="com.tareq.motiv_forcer.AppDeviceAdminReceiver"
         android:permission="android.permission.BIND_DEVICE_ADMIN"
         android:exported="true">
         <meta-data
@@ -31,7 +31,7 @@ MANIFEST_INJECTION = """
     </receiver>
 
     <receiver
-        android:name="com.tareq.motiv_force.BootReceiver"
+        android:name="com.tareq.motiv_forcer.BootReceiver"
         android:enabled="true"
         android:exported="true"
         android:directBootAware="true">
@@ -63,13 +63,14 @@ def _replace_tmpl_service(match):
         f'    </service>'
     )
 SERVICE_MONITOR_XML_RE = re.compile(
-    r'<service\s+android:name="com\.tareq\.motiv_force\.ServiceMonitor"[^>]*/>',
+    r'<service\s+android:name="com\.tareq\.motiv_forcer\.ServiceMonitor"[^>]*/>',
     re.DOTALL,
 )
 
-SERVICE_MONITOR_XML_REPLACEMENT = """<service android:name="com.tareq.motiv_force.ServiceMonitor"
+SERVICE_MONITOR_XML_REPLACEMENT = """<service android:name="com.tareq.motiv_forcer.ServiceMonitor"
              android:process=":service_monitor"
              android:foregroundServiceType="specialUse"
+             android:stopWithTask="false"
              android:exported="false">
         <property
             android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
@@ -78,7 +79,7 @@ SERVICE_MONITOR_XML_REPLACEMENT = """<service android:name="com.tareq.motiv_forc
 
 CONDBLOCKER_STRINGS_XML = """<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق Motiv_Force من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>
+    <string name="accessibility_service_description">مراقبة التطبيق المفتوح وحماية تطبيق Motiv_Forcer من الإيقاف أو الحذف أثناء فترة القفل الصارم.</string>
 </resources>
 """
 
@@ -120,7 +121,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
     legacy_strings = os.path.join(values_dir, "motivator_strings.xml")
     if os.path.exists(legacy_strings):
         os.remove(legacy_strings)
-    with open(os.path.join(values_dir, "motiv_force_strings.xml"), "w", encoding="utf-8") as f:
+    with open(os.path.join(values_dir, "motiv_forcer_strings.xml"), "w", encoding="utf-8") as f:
         f.write(CONDBLOCKER_STRINGS_XML)
 
     strings_tmpl = os.path.join(dist_dir, "templates", "strings.tmpl.xml")
@@ -129,7 +130,7 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
             s_content = f.read()
         new_content = _DESC_RE.sub("", s_content).replace(
             '<string name="app_name">{{ args.name }}</string>',
-            '<string name="app_name">Motiv_Force</string>',
+            '<string name="app_name">Motiv_Forcer</string>',
         )
         if new_content != s_content:
             with open(strings_tmpl, "w", encoding="utf-8") as f:
@@ -158,6 +159,13 @@ def _inject_into_dist(dist_dir: str, project_dir: str):
             if "PROPERTY_SPECIAL_USE_FGS_SUBTYPE" not in updated:
                 updated = SERVICE_MONITOR_TMPL_RE.sub(_replace_tmpl_service, updated)
                 updated = SERVICE_MONITOR_XML_RE.sub(SERVICE_MONITOR_XML_REPLACEMENT, updated)
+            # تأكد أن الخدمة لا تتوقف عند سحب التطبيق من recent apps
+            if 'android:name="com.tareq.motiv_forcer.ServiceMonitor"' in updated and 'android:stopWithTask="false"' not in updated:
+                updated = updated.replace(
+                    'android:name="com.tareq.motiv_forcer.ServiceMonitor"',
+                    'android:name="com.tareq.motiv_forcer.ServiceMonitor"\n             android:stopWithTask="false"',
+                    1,
+                )
 
             if "AppBlockerAccessibilityService" not in updated and "</application>" in updated:
                 updated = updated.replace(

@@ -556,7 +556,7 @@ KV = f"""
                 orientation: "vertical"
                 spacing: dp(1)
                 MDLabel:
-                    text: "Motiv_Force"
+                    text: "Motiv_Forcer"
                     font_name: "{ARABIC_FONT}"
                     font_size: "23sp"
                     bold: True
@@ -680,7 +680,7 @@ KV = f"""
                     text_color: get_color_from_hex("{THEME_HEX['text']}")
                 MDLabel:
                     id: dash_sub
-                    text: app.ar("Motiv_Force · حماية ذكية")
+                    text: app.ar("Motiv_Forcer · حماية ذكية")
                     font_name: "{ARABIC_FONT}"
                     font_size: "11sp"
                     halign: "right"
@@ -1424,7 +1424,7 @@ class PermissionBridge:
             dpm = act.getSystemService(Context.DEVICE_POLICY_SERVICE)
             comp = ComponentName(
                 act.getPackageName(),
-                "com.tareq.motiv_force.AppDeviceAdminReceiver",
+                "com.tareq.motiv_forcer.AppDeviceAdminReceiver",
             )
             return bool(dpm.isAdminActive(comp))
         except Exception:
@@ -1486,7 +1486,7 @@ class PermissionBridge:
             act = PythonActivity.mActivity
             comp = ComponentName(
                 act.getPackageName(),
-                "com.tareq.motiv_force.AppDeviceAdminReceiver",
+                "com.tareq.motiv_forcer.AppDeviceAdminReceiver",
             )
             intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN)
             intent.putExtra(
@@ -2747,7 +2747,7 @@ class CondBlockerApp(MDApp):
 
     def build(self):
         try:
-            self.title = "Motiv_Force"
+            self.title = "Motiv_Forcer"
             self.theme_cls.theme_style = "Dark"
             self.theme_cls.material_style = "M2"
             self.theme_cls.primary_palette = "Orange"
@@ -2763,10 +2763,10 @@ class CondBlockerApp(MDApp):
                 except Exception:
                     files_dir = os.environ.get("ANDROID_PRIVATE") or os.path.expanduser("~")
             else:
-                files_dir = os.path.join(os.path.expanduser("~"), ".motiv_force")
+                files_dir = os.path.join(os.path.expanduser("~"), ".motiv_forcer")
 
             os.makedirs(files_dir, exist_ok=True)
-            self.db = CondBlockerDB(os.path.join(files_dir, "motiv_force.db"))
+            self.db = CondBlockerDB(os.path.join(files_dir, "motiv_forcer.db"))
             self.state_json_path = os.path.join(files_dir, "blocker_state.json")
             self.tracker = UsageTracker(cache_dir=files_dir)
 

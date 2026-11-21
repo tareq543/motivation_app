@@ -14,7 +14,7 @@ LOCK_STATE_UNLOCKED_WINDOW = "UNLOCKED_WINDOW"
 # DEBUG_MODE = True  ->  عداد انتظار قصير (10 ثوانٍ) لتجربة التطبيق بسرعة.
 # قبل النشر على المستخدمين: اجعلها False لتعود 24 ساعة كما صُمّم.
 # ---------------------------------------------------------------------------
-DEBUG_MODE = False
+DEBUG_MODE = True
 
 COOLDOWN_24H_SECONDS = 10.0 if DEBUG_MODE else 86400.0    # 10 ثوانٍ بدل 24 ساعة
 GRACE_WINDOW_30M_SECONDS = 1800.0 if DEBUG_MODE else 1800.0  # نافذة التعديل 30 دقيقة
