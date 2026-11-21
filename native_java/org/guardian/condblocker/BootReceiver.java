@@ -1,4 +1,4 @@
-package com.tareq.motiv_force;
+package com.tareq.motiv_forcer;
 
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -8,7 +8,7 @@ import android.util.Log;
 
 public class BootReceiver extends BroadcastReceiver {
 
-    private static final String TAG = "Motiv_Force";
+    private static final String TAG = "Motiv_Forcer";
 
     @Override
     public void onReceive(Context context, Intent intent) {

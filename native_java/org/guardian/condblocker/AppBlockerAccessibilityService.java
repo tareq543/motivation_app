@@ -1,4 +1,4 @@
-package com.tareq.motiv_force;
+package com.tareq.motiv_forcer;
 
 import android.accessibilityservice.AccessibilityService;
 import android.util.Log;
@@ -18,7 +18,7 @@ import java.util.Set;
 
 public class AppBlockerAccessibilityService extends AccessibilityService {
 
-    private static final String TAG = "Motiv_Force";
+    private static final String TAG = "Motiv_Forcer";
 
     private String lastLockState = "LOCKED";
     private boolean onboardingComplete = false;
@@ -116,7 +116,7 @@ public class AppBlockerAccessibilityService extends AccessibilityService {
 
     private boolean containsDangerousKeywords(AccessibilityNodeInfo root, String myPkg) {
         String[] appIdentifiers = new String[]{
-                "Motiv_Force", "الحظر المشروط", myPkg
+                "Motiv_Forcer", "الحظر المشروط", myPkg
         };
         boolean mentionsOurApp = false;
         for (String id : appIdentifiers) {
